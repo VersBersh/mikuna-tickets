@@ -4,7 +4,7 @@ const state = {
   ticketFilters: {},
   splitCount: 0,
   currentTicket: null,
-  editingTicket: null,
+  openTickets: [],
   dirty: false,
   autosaveTimer: null,
   autosaveInFlight: false,
@@ -39,17 +39,26 @@ function selectInputValue(event) {
 
 async function switchView(view) {
   const activeView = $(".view.active")?.id.replace("view-", "");
+  if (view === "order" && state.currentTicket) {
+    const saved = await flushAutosave();
+    if (!saved) return;
+  }
   if (activeView === "order" && view !== "order") {
     const saved = await flushAutosave();
     if (!saved) return;
   }
+  if (view === "order") {
+    state.currentTicket = null;
+    clearOrder({ keepTicketTabs: true });
+  }
   $$(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
   $$(".view").forEach((panel) => panel.classList.toggle("active", panel.id === `view-${view}`));
+  renderTicketTabs();
 }
 
-function markDirty() {
+function markDirty({ schedule = false } = {}) {
   state.dirty = true;
-  if (state.editingTicket && !state.currentTicket) {
+  if (schedule && state.currentTicket) {
     scheduleAutosave();
   }
 }
@@ -57,7 +66,7 @@ function markDirty() {
 function scheduleAutosave() {
   window.clearTimeout(state.autosaveTimer);
   state.autosaveTimer = window.setTimeout(() => {
-    saveCurrentWork({ clearAfter: false, autosave: true });
+    saveCurrentWork({ clearAfter: false, autosave: true, includePayments: false });
   }, 1200);
 }
 
@@ -66,17 +75,49 @@ function stopAutosaveTimer() {
   state.autosaveTimer = null;
 }
 
-function activeItems() {
-  if (state.currentTicket) {
-    return state.currentTicket.remaining_items
-      .filter((item) => item.remaining_quantity > 0)
-      .map((item) => ({
-        code: item.menu_code,
-        name: item.name,
-        price: item.unit_price,
-        quantity: item.remaining_quantity,
-      }));
+function renderTicketTabs() {
+  const orderViewActive = $("#view-order")?.classList.contains("active");
+  $("#ticketTabs").innerHTML = state.openTickets.map((ticket) => `
+    <button
+      class="tab ticket-tab ${orderViewActive && state.currentTicket?.id === ticket.id ? "active" : ""}"
+      data-ticket-tab="${ticket.id}"
+      type="button"
+    >
+      #${ticket.id} ${ticket.table_no}
+      <span>${fmt(ticket.outstanding)}</span>
+    </button>
+  `).join("");
+  $$("[data-ticket-tab]").forEach((button) => {
+    button.addEventListener("click", () => openTicketTab(Number(button.dataset.ticketTab)));
+  });
+}
+
+function upsertTicketTab(ticket) {
+  const tab = {
+    id: ticket.id,
+    table_no: ticket.table_no,
+    outstanding: ticket.outstanding,
+  };
+  const index = state.openTickets.findIndex((open) => open.id === ticket.id);
+  if (index >= 0) {
+    state.openTickets[index] = tab;
+  } else {
+    state.openTickets.push(tab);
   }
+  renderTicketTabs();
+}
+
+function closeTicketTab(ticketId) {
+  state.openTickets = state.openTickets.filter((ticket) => ticket.id !== Number(ticketId));
+  if (state.currentTicket?.id === Number(ticketId)) {
+    state.currentTicket = null;
+    clearOrder({ keepTicketTabs: true });
+  } else {
+    renderTicketTabs();
+  }
+}
+
+function activeItems() {
   return state.menu
     .map((item) => ({
       code: item.code,
@@ -87,47 +128,57 @@ function activeItems() {
     .filter((item) => item.quantity > 0);
 }
 
+function ticketItemByCode(code) {
+  return state.currentTicket?.items?.find((item) => item.menu_code === code);
+}
+
+function remainingItemByCode(code) {
+  return state.currentTicket?.remaining_items?.find((item) => item.menu_code === code);
+}
+
+function payableItems() {
+  if (!state.currentTicket) return activeItems();
+  return state.menu
+    .map((item) => {
+      const orderedQuantity = state.quantities[item.code] || 0;
+      const remaining = remainingItemByCode(item.code);
+      const existing = ticketItemByCode(item.code);
+      const paidQuantity = remaining ? remaining.paid_quantity : 0;
+      const quantity = Math.max(0, orderedQuantity - paidQuantity);
+      return {
+        code: item.code,
+        name: existing?.name || item.name,
+        price: existing?.unit_price || item.price,
+        quantity,
+      };
+    })
+    .filter((item) => item.quantity > 0);
+}
+
 function activeSubtotal() {
-  return activeItems().reduce((sum, item) => sum + item.quantity * item.price, 0);
+  return payableItems().reduce((sum, item) => sum + item.quantity * item.price, 0);
 }
 
 function renderMenuPicker() {
   const list = $("#menuList");
   list.innerHTML = "";
+  $("#orderTitle").textContent = state.currentTicket ? `Ticket #${state.currentTicket.id}` : "New order";
+  $("#paymentTitle").textContent = state.currentTicket ? "Edit or pay" : "Payment";
+  $("#saveAction").textContent = state.currentTicket ? "Save ticket" : "Save ticket";
+  $("#paymentSurface").classList.remove("hidden");
+  $$(".new-only").forEach((node) => node.classList.remove("hidden"));
   if (state.currentTicket) {
-    state.editingTicket = null;
-    $("#orderTitle").textContent = `Ticket #${state.currentTicket.id}`;
-    $("#paymentTitle").textContent = "Pay selected items";
-    $("#saveAction").textContent = "Save payment";
     $("#ticketBanner").classList.remove("hidden");
     $("#ticketBanner").innerHTML = `<strong>${state.currentTicket.table_no}</strong> · ${fmt(state.currentTicket.outstanding)} remaining · ${state.currentTicket.note || "No note"}`;
-    $$(".new-only").forEach((node) => node.classList.add("hidden"));
-    $("#paymentSurface").classList.remove("hidden");
-    const remaining = activeItems();
-    list.innerHTML = remaining.length
-      ? remaining.map((item) => `
-        <div class="menu-row">
-          <div><strong>${item.code} · ${item.name}</strong><span>${item.quantity} remaining at ${fmt(item.price)}</span></div>
-          <strong>${fmt(item.quantity * item.price)}</strong>
-        </div>
-      `).join("")
-      : `<div class="empty">This ticket is fully paid.</div>`;
-    renderSplits();
-    recalc();
-    return;
+  } else {
+    $("#ticketBanner").classList.add("hidden");
   }
-
-  $("#orderTitle").textContent = state.editingTicket ? `Edit ticket #${state.editingTicket.id}` : "New ticket";
-  $("#paymentTitle").textContent = "Payment";
-  $("#saveAction").textContent = state.editingTicket ? "Save correction" : "Save ticket";
-  $("#ticketBanner").classList.add("hidden");
-  $$(".new-only").forEach((node) => node.classList.remove("hidden"));
-  $("#paymentSurface").classList.toggle("hidden", Boolean(state.editingTicket));
   state.menu.filter((item) => item.active).forEach((item) => {
+    const existing = ticketItemByCode(item.code);
     const row = document.createElement("div");
     row.className = "menu-row";
     row.innerHTML = `
-      <div><strong>${item.code} · ${item.name}</strong><span>${fmt(item.price)}</span></div>
+      <div><strong>${item.code} · ${item.name}</strong><span>${fmt(existing?.unit_price || item.price)}</span></div>
       <div class="qty-control">
         <button type="button" data-step="-1">-</button>
         <input type="number" min="0" step="1" value="${state.quantities[item.code] || 0}">
@@ -139,7 +190,7 @@ function renderMenuPicker() {
       state.quantities[item.code] = Math.max(0, money(input.value));
       renderSplits();
       recalc();
-      markDirty();
+      markDirty({ schedule: Boolean(state.currentTicket) });
     });
     $$("button", row).forEach((button) => {
       button.addEventListener("click", () => {
@@ -148,11 +199,13 @@ function renderMenuPicker() {
         input.value = next;
         renderSplits();
         recalc();
-        markDirty();
+        markDirty({ schedule: Boolean(state.currentTicket) });
       });
     });
     list.appendChild(row);
   });
+  renderSplits();
+  recalc();
 }
 
 function renderTicketFilters() {
@@ -197,7 +250,7 @@ function addSplit(markAsDirty = true) {
     markDirty();
   });
   $(".fill-split", node).addEventListener("click", () => {
-    activeItems().forEach((item) => {
+    payableItems().forEach((item) => {
       const input = $(`.allocation input[data-code="${item.code}"]`, node);
       if (input) input.value = item.quantity;
     });
@@ -221,7 +274,7 @@ function renderAllocations(split) {
   const previous = Object.fromEntries(
     $$(".allocation input", split).map((input) => [input.dataset.code, input.value])
   );
-  const items = activeItems();
+  const items = payableItems();
   allocations.innerHTML = items.length
     ? items.map((item) => `
       <label class="allocation">
@@ -311,29 +364,17 @@ function hasTicketDraft() {
   return $("#tableNo").value.trim() && activeItems().length > 0;
 }
 
-async function saveCurrentWork({ clearAfter, autosave = false } = { clearAfter: true, autosave: false }) {
+async function saveCurrentWork(
+  { clearAfter, autosave = false, includePayments = true } = { clearAfter: true, autosave: false, includePayments: true }
+) {
   if (state.autosaveInFlight) return true;
   stopAutosaveTimer();
-  const payments = paymentPayloads();
+  const payments = includePayments ? paymentPayloads() : [];
   const hasPayments = payments.length > 0;
   try {
     state.autosaveInFlight = true;
     if (state.currentTicket) {
-      if (!hasPayments) {
-        state.dirty = false;
-        return true;
-      }
-      const ticket = await api(`/api/orders/${state.currentTicket.id}/payments`, {
-        method: "POST",
-        body: JSON.stringify({ payments }),
-      });
-      setStatus(`${autosave ? "Autosaved" : "Saved"} payment for ticket #${ticket.id}`);
-      clearOrder();
-    } else if (state.editingTicket) {
-      if (!hasTicketDraft()) {
-        return true;
-      }
-      const ticket = await api(`/api/orders/${state.editingTicket.id}`, {
+      let ticket = await api(`/api/orders/${state.currentTicket.id}`, {
         method: "PUT",
         body: JSON.stringify({
           table_no: $("#tableNo").value.trim(),
@@ -341,10 +382,18 @@ async function saveCurrentWork({ clearAfter, autosave = false } = { clearAfter: 
           items: activeItems().map((item) => ({ menu_code: item.code, quantity: item.quantity })),
         }),
       });
-      state.editingTicket = ticket;
+      if (hasPayments) {
+        ticket = await api(`/api/orders/${state.currentTicket.id}/payments`, {
+          method: "POST",
+          body: JSON.stringify({ payments }),
+        });
+      }
+      state.currentTicket = ticket;
       state.dirty = false;
-      setStatus(`${autosave ? "Autosaved" : "Updated"} ticket #${ticket.id}`);
-      if (clearAfter) clearOrder();
+      setStatus(`${autosave ? "Autosaved" : "Saved"} ticket #${ticket.id}`);
+      upsertTicketTab(ticket);
+      loadTicketIntoForm(ticket);
+      if (clearAfter && ticket.outstanding <= 0.009) closeTicketTab(ticket.id);
     } else {
       if (!hasTicketDraft()) {
         state.dirty = false;
@@ -356,8 +405,9 @@ async function saveCurrentWork({ clearAfter, autosave = false } = { clearAfter: 
       if (clearAfter || hasPayments) {
         clearOrder();
       } else {
-        state.editingTicket = order;
-        renderMenuPicker();
+        upsertTicketTab(order);
+        state.currentTicket = order;
+        loadTicketIntoForm(order);
       }
     }
     await refreshAll();
@@ -384,7 +434,6 @@ async function flushAutosave() {
 function clearOrder() {
   stopAutosaveTimer();
   state.currentTicket = null;
-  state.editingTicket = null;
   state.dirty = false;
   state.quantities = {};
   state.menu.forEach((item) => { state.quantities[item.code] = 0; });
@@ -395,22 +444,11 @@ function clearOrder() {
   addSplit(false);
   renderMenuPicker();
   recalc();
+  renderTicketTabs();
 }
 
-async function loadTicket(id) {
-  state.currentTicket = await api(`/api/orders/${id}`);
-  state.editingTicket = null;
-  $("#splits").innerHTML = "";
-  state.splitCount = 0;
-  addSplit(false);
-  renderMenuPicker();
-  switchView("order");
-}
-
-async function editTicket(id) {
-  const ticket = await api(`/api/orders/${id}`);
-  state.currentTicket = null;
-  state.editingTicket = ticket;
+function loadTicketIntoForm(ticket) {
+  state.currentTicket = ticket;
   state.quantities = {};
   state.menu.forEach((item) => { state.quantities[item.code] = 0; });
   ticket.items.forEach((item) => { state.quantities[item.menu_code] = item.quantity; });
@@ -418,9 +456,27 @@ async function editTicket(id) {
   $("#orderNote").value = ticket.note || "";
   $("#splits").innerHTML = "";
   state.splitCount = 0;
+  addSplit(false);
   renderMenuPicker();
-  recalc();
-  switchView("order");
+  state.dirty = false;
+  renderTicketTabs();
+}
+
+async function openTicketTab(id) {
+  const activeView = $(".view.active")?.id.replace("view-", "");
+  if (activeView === "order" && state.currentTicket?.id === Number(id)) {
+    return;
+  }
+  if (activeView === "order" && state.currentTicket?.id !== Number(id)) {
+    const saved = await flushAutosave();
+    if (!saved) return;
+  }
+  const ticket = await api(`/api/orders/${id}`);
+  upsertTicketTab(ticket);
+  loadTicketIntoForm(ticket);
+  $$(".view").forEach((panel) => panel.classList.toggle("active", panel.id === "view-order"));
+  $$(".tab[data-view]").forEach((tab) => tab.classList.remove("active"));
+  renderTicketTabs();
 }
 
 async function renderTickets() {
@@ -439,18 +495,17 @@ async function renderTickets() {
         <span>${ticket.items || "No items"}${ticket.note ? ` · ${ticket.note}` : ""}</span>
       </div>
       <div class="row-actions">
-        <button data-pay="${ticket.id}" type="button">Pay</button>
-        <button data-edit="${ticket.id}" type="button">Edit</button>
+        <button data-open-ticket="${ticket.id}" type="button">Open</button>
         <button class="danger" data-delete="${ticket.id}" type="button">Delete</button>
       </div>
     </div>
   `).join("") : `<div class="empty">No matching tickets</div>`;
-  $$("[data-pay]").forEach((button) => button.addEventListener("click", () => loadTicket(button.dataset.pay)));
-  $$("[data-edit]").forEach((button) => button.addEventListener("click", () => editTicket(button.dataset.edit)));
+  $$("[data-open-ticket]").forEach((button) => button.addEventListener("click", () => openTicketTab(button.dataset.openTicket)));
   $$("[data-delete]").forEach((button) => {
     button.addEventListener("click", async () => {
       if (!confirm("Delete this ticket?")) return;
       await api(`/api/orders/${button.dataset.delete}`, { method: "DELETE" });
+      closeTicketTab(button.dataset.delete);
       await refreshAll();
     });
   });
@@ -603,8 +658,8 @@ $$(".tab").forEach((tab) => tab.addEventListener("click", () => switchView(tab.d
 document.addEventListener("focusin", selectInputValue);
 $("#saveAction").addEventListener("click", saveAction);
 $("#clearOrder").addEventListener("click", clearOrder);
-$("#tableNo").addEventListener("input", markDirty);
-$("#orderNote").addEventListener("input", markDirty);
+$("#tableNo").addEventListener("input", () => markDirty({ schedule: Boolean(state.currentTicket) }));
+$("#orderNote").addEventListener("input", () => markDirty({ schedule: Boolean(state.currentTicket) }));
 $("#addSplit").addEventListener("click", () => addSplit(true));
 $("#ticketSearch").addEventListener("input", renderTickets);
 $("#openOnly").addEventListener("change", renderTickets);

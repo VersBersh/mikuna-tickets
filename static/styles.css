@@ -104,6 +104,20 @@ h2 {
   overflow-x: auto;
 }
 
+.ticket-tabs {
+  display: contents;
+}
+
+.ticket-tab span {
+  color: var(--muted);
+  font-size: 12px;
+  margin-left: 6px;
+}
+
+.ticket-tab.active span {
+  color: inherit;
+}
+
 .tab {
   border: 0;
   border-bottom: 2px solid transparent;

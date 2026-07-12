@@ -5,6 +5,9 @@ const state = {
   splitCount: 0,
   currentTicket: null,
   editingTicket: null,
+  dirty: false,
+  autosaveTimer: null,
+  autosaveInFlight: false,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -34,9 +37,33 @@ function selectInputValue(event) {
   window.setTimeout(() => input.select(), 0);
 }
 
-function switchView(view) {
+async function switchView(view) {
+  const activeView = $(".view.active")?.id.replace("view-", "");
+  if (activeView === "order" && view !== "order") {
+    const saved = await flushAutosave();
+    if (!saved) return;
+  }
   $$(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
   $$(".view").forEach((panel) => panel.classList.toggle("active", panel.id === `view-${view}`));
+}
+
+function markDirty() {
+  state.dirty = true;
+  if (state.editingTicket && !state.currentTicket) {
+    scheduleAutosave();
+  }
+}
+
+function scheduleAutosave() {
+  window.clearTimeout(state.autosaveTimer);
+  state.autosaveTimer = window.setTimeout(() => {
+    saveCurrentWork({ clearAfter: false, autosave: true });
+  }, 1200);
+}
+
+function stopAutosaveTimer() {
+  window.clearTimeout(state.autosaveTimer);
+  state.autosaveTimer = null;
 }
 
 function activeItems() {
@@ -112,6 +139,7 @@ function renderMenuPicker() {
       state.quantities[item.code] = Math.max(0, money(input.value));
       renderSplits();
       recalc();
+      markDirty();
     });
     $$("button", row).forEach((button) => {
       button.addEventListener("click", () => {
@@ -120,6 +148,7 @@ function renderMenuPicker() {
         input.value = next;
         renderSplits();
         recalc();
+        markDirty();
       });
     });
     list.appendChild(row);
@@ -157,7 +186,7 @@ function renderTicketFilters() {
   });
 }
 
-function addSplit() {
+function addSplit(markAsDirty = true) {
   state.splitCount += 1;
   const node = $("#splitTemplate").content.firstElementChild.cloneNode(true);
   node.dataset.split = state.splitCount;
@@ -165,6 +194,7 @@ function addSplit() {
   $(".remove-split", node).addEventListener("click", () => {
     node.remove();
     recalc();
+    markDirty();
   });
   $(".fill-split", node).addEventListener("click", () => {
     activeItems().forEach((item) => {
@@ -172,15 +202,17 @@ function addSplit() {
       if (input) input.value = item.quantity;
     });
     recalc();
+    markDirty();
   });
   $("#splits").appendChild(node);
   renderAllocations(node);
   recalc();
+  if (markAsDirty) markDirty();
 }
 
 function renderSplits() {
   const splits = $$(".split");
-  if (splits.length === 0) addSplit();
+  if (splits.length === 0) addSplit(false);
   $$(".split").forEach(renderAllocations);
 }
 
@@ -199,8 +231,18 @@ function renderAllocations(split) {
       </label>
     `).join("")
     : `<div class="empty">Add items before taking payment.</div>`;
-  $$("input", allocations).forEach((input) => input.addEventListener("input", recalc));
-  $$("input, select", split).forEach((input) => input.addEventListener("input", recalc));
+  $$("input", allocations).forEach((input) => {
+    input.addEventListener("input", () => {
+      recalc();
+      markDirty();
+    });
+  });
+  $$(".split-grid input, .split-grid select", split).forEach((input) => {
+    input.addEventListener("input", () => {
+      recalc();
+      markDirty();
+    });
+  });
 }
 
 function splitData(row, index) {
@@ -259,17 +301,38 @@ function orderPayload() {
   };
 }
 
-async function saveAction() {
+function paymentPayloads() {
+  return $$(".split")
+    .map(splitData)
+    .filter((payment) => payment.subtotal > 0 || payment.total_with_tip > 0);
+}
+
+function hasTicketDraft() {
+  return $("#tableNo").value.trim() && activeItems().length > 0;
+}
+
+async function saveCurrentWork({ clearAfter, autosave = false } = { clearAfter: true, autosave: false }) {
+  if (state.autosaveInFlight) return true;
+  stopAutosaveTimer();
+  const payments = paymentPayloads();
+  const hasPayments = payments.length > 0;
   try {
+    state.autosaveInFlight = true;
     if (state.currentTicket) {
-      const payments = $$(".split").map(splitData).filter((payment) => payment.subtotal > 0 || payment.total_with_tip > 0);
+      if (!hasPayments) {
+        state.dirty = false;
+        return true;
+      }
       const ticket = await api(`/api/orders/${state.currentTicket.id}/payments`, {
         method: "POST",
         body: JSON.stringify({ payments }),
       });
-      setStatus(`Payment saved for ticket #${ticket.id}`);
+      setStatus(`${autosave ? "Autosaved" : "Saved"} payment for ticket #${ticket.id}`);
       clearOrder();
     } else if (state.editingTicket) {
+      if (!hasTicketDraft()) {
+        return true;
+      }
       const ticket = await api(`/api/orders/${state.editingTicket.id}`, {
         method: "PUT",
         body: JSON.stringify({
@@ -278,29 +341,58 @@ async function saveAction() {
           items: activeItems().map((item) => ({ menu_code: item.code, quantity: item.quantity })),
         }),
       });
-      setStatus(`Updated ticket #${ticket.id}`);
-      clearOrder();
+      state.editingTicket = ticket;
+      state.dirty = false;
+      setStatus(`${autosave ? "Autosaved" : "Updated"} ticket #${ticket.id}`);
+      if (clearAfter) clearOrder();
     } else {
+      if (!hasTicketDraft()) {
+        state.dirty = false;
+        return true;
+      }
       const order = await api("/api/orders", { method: "POST", body: JSON.stringify(orderPayload()) });
-      setStatus(`Saved ticket #${order.id} for ${order.table_no}`);
-      clearOrder();
+      setStatus(`${autosave ? "Autosaved" : "Saved"} ticket #${order.id} for ${order.table_no}`);
+      state.dirty = false;
+      if (clearAfter || hasPayments) {
+        clearOrder();
+      } else {
+        state.editingTicket = order;
+        renderMenuPicker();
+      }
     }
     await refreshAll();
+    return true;
   } catch (error) {
     setStatus(error.message);
+    return false;
+  } finally {
+    state.autosaveInFlight = false;
   }
 }
 
+async function saveAction() {
+  await saveCurrentWork({ clearAfter: true, autosave: false });
+}
+
+async function flushAutosave() {
+  if (!state.dirty && !hasTicketDraft() && !(state.currentTicket && paymentPayloads().length)) {
+    return true;
+  }
+  return saveCurrentWork({ clearAfter: Boolean(state.currentTicket), autosave: true });
+}
+
 function clearOrder() {
+  stopAutosaveTimer();
   state.currentTicket = null;
   state.editingTicket = null;
+  state.dirty = false;
   state.quantities = {};
   state.menu.forEach((item) => { state.quantities[item.code] = 0; });
   $("#tableNo").value = "";
   $("#orderNote").value = "";
   $("#splits").innerHTML = "";
   state.splitCount = 0;
-  addSplit();
+  addSplit(false);
   renderMenuPicker();
   recalc();
 }
@@ -310,7 +402,7 @@ async function loadTicket(id) {
   state.editingTicket = null;
   $("#splits").innerHTML = "";
   state.splitCount = 0;
-  addSplit();
+  addSplit(false);
   renderMenuPicker();
   switchView("order");
 }
@@ -502,7 +594,7 @@ async function refreshAll() {
 
 async function start() {
   await loadMenu();
-  addSplit();
+  addSplit(false);
   await refreshAll();
   setStatus("Ready");
 }
@@ -511,7 +603,9 @@ $$(".tab").forEach((tab) => tab.addEventListener("click", () => switchView(tab.d
 document.addEventListener("focusin", selectInputValue);
 $("#saveAction").addEventListener("click", saveAction);
 $("#clearOrder").addEventListener("click", clearOrder);
-$("#addSplit").addEventListener("click", addSplit);
+$("#tableNo").addEventListener("input", markDirty);
+$("#orderNote").addEventListener("input", markDirty);
+$("#addSplit").addEventListener("click", () => addSplit(true));
 $("#ticketSearch").addEventListener("input", renderTickets);
 $("#openOnly").addEventListener("change", renderTickets);
 $("#clearTicketFilters").addEventListener("click", () => {

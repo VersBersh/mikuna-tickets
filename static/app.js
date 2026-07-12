@@ -518,25 +518,30 @@ function renderMenuEditor() {
       <input class="edit-name" value="${item.name}">
       <input class="edit-price" type="number" min="0" step="0.01" value="${item.price}">
       <div class="order-actions">
-        <button data-move-menu="${item.code}" data-direction="-1" type="button" ${index === 0 ? "disabled" : ""}>Up</button>
-        <button data-move-menu="${item.code}" data-direction="1" type="button" ${index === state.menu.length - 1 ? "disabled" : ""}>Down</button>
+        <button class="icon-button" data-move-menu-index="${index}" data-direction="-1" type="button" title="Move up" aria-label="Move item up" ${index === 0 ? "disabled" : ""}>&#8593;</button>
+        <button class="icon-button" data-move-menu-index="${index}" data-direction="1" type="button" title="Move down" aria-label="Move item down" ${index === state.menu.length - 1 ? "disabled" : ""}>&#8595;</button>
       </div>
       <button data-save-menu="${item.code}" type="button">Save</button>
       <button class="danger" data-delete-menu="${item.code}" type="button">Delete</button>
     </div>
   `).join("");
-  $$("[data-move-menu]").forEach((button) => {
+  $$("[data-move-menu-index]").forEach((button) => {
     button.addEventListener("click", async () => {
-      const index = state.menu.findIndex((item) => item.code === button.dataset.moveMenu);
-      const nextIndex = index + Number(button.dataset.direction);
-      if (index < 0 || nextIndex < 0 || nextIndex >= state.menu.length) return;
-      const nextMenu = [...state.menu];
-      [nextMenu[index], nextMenu[nextIndex]] = [nextMenu[nextIndex], nextMenu[index]];
-      await api("/api/menu/reorder", {
-        method: "POST",
-        body: JSON.stringify({ codes: nextMenu.map((item) => item.code) }),
-      });
-      await loadMenu();
+      try {
+        const index = Number(button.dataset.moveMenuIndex);
+        const nextIndex = index + Number(button.dataset.direction);
+        if (index < 0 || nextIndex < 0 || nextIndex >= state.menu.length) return;
+        const nextMenu = [...state.menu];
+        [nextMenu[index], nextMenu[nextIndex]] = [nextMenu[nextIndex], nextMenu[index]];
+        await api("/api/menu/reorder", {
+          method: "POST",
+          body: JSON.stringify({ codes: nextMenu.map((item) => item.code) }),
+        });
+        setStatus("Menu order saved");
+        await loadMenu();
+      } catch (error) {
+        setStatus(error.message);
+      }
     });
   });
   $$("[data-save-menu]").forEach((button) => {

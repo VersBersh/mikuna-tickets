@@ -286,6 +286,13 @@ select:focus {
   opacity: 0.45;
 }
 
+.icon-button {
+  min-width: 36px;
+  padding-inline: 8px;
+  font-size: 16px;
+  line-height: 1;
+}
+
 .title-actions {
   display: flex;
   flex-wrap: wrap;

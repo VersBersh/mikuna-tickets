@@ -37,6 +37,21 @@ function setStatus(text) {
   $("#status").textContent = text;
 }
 
+function markFieldInvalid(input, message, { focus = true } = {}) {
+  input.classList.add("invalid");
+  input.setCustomValidity(message);
+  setStatus(message);
+  if (focus) {
+    input.focus();
+    input.reportValidity();
+  }
+}
+
+function clearFieldInvalid(input) {
+  input.classList.remove("invalid");
+  input.setCustomValidity("");
+}
+
 function selectInputValue(event) {
   const input = event.target;
   if (!(input instanceof HTMLInputElement) || input.disabled || input.type !== "number") {
@@ -660,6 +675,20 @@ function hasTicketDraft() {
   return $("#tableNo").value.trim() && activeItems().length > 0;
 }
 
+function validateTicketForSave() {
+  const tableInput = $("#tableNo");
+  clearFieldInvalid(tableInput);
+  if (!tableInput.value.trim()) {
+    markFieldInvalid(tableInput, "Add a table or person before saving.");
+    return false;
+  }
+  if (activeItems().length === 0) {
+    setStatus("Add at least one item before saving.");
+    return false;
+  }
+  return true;
+}
+
 function hasClearableNewOrderDraft() {
   return !state.currentTicket && (
     $("#tableNo").value.trim()
@@ -736,6 +765,7 @@ async function saveCurrentWork(
 }
 
 async function saveAction() {
+  if (!validateTicketForSave()) return;
   await saveCurrentWork({ clearAfter: true, autosave: false });
 }
 
@@ -1011,7 +1041,10 @@ $$(".tab").forEach((tab) => tab.addEventListener("click", () => switchView(tab.d
 document.addEventListener("focusin", selectInputValue);
 $("#saveAction").addEventListener("click", saveAction);
 $("#clearOrder").addEventListener("click", clearOrderAction);
-$("#tableNo").addEventListener("input", () => markDirty({ schedule: Boolean(state.currentTicket) }));
+$("#tableNo").addEventListener("input", () => {
+  clearFieldInvalid($("#tableNo"));
+  markDirty({ schedule: Boolean(state.currentTicket) });
+});
 $("#orderNote").addEventListener("input", () => markDirty({ schedule: Boolean(state.currentTicket) }));
 $("#addSplit").addEventListener("click", () => addSplit(true));
 $("#ticketSearch").addEventListener("input", renderTickets);

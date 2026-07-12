@@ -254,6 +254,11 @@ select:focus {
   outline: none;
 }
 
+input.invalid {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 2px rgba(197, 15, 31, 0.14);
+}
+
 input[readonly] {
   background: var(--surface-2);
   color: var(--muted);

@@ -9,6 +9,7 @@ const state = {
   autosaveTimer: null,
   autosaveInFlight: false,
   menuSaveTimers: {},
+  editingPaymentId: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -85,7 +86,7 @@ function stopAutosaveTimer() {
 function renderTicketTabs() {
   const orderViewActive = $("#view-order")?.classList.contains("active");
   $("#ticketTabs").innerHTML = state.openTickets.map((ticket) => `
-    <span class="ticket-tab-wrap ${orderViewActive && state.currentTicket?.id === ticket.id ? "active" : ""}">
+    <span class="ticket-tab-wrap ${orderViewActive && state.currentTicket?.id === ticket.id ? "active" : ""} ${ticket.outstanding <= 0.009 ? "settled" : "open-ticket"}">
       <button
         class="tab ticket-tab"
         data-ticket-tab="${ticket.id}"
@@ -209,9 +210,12 @@ function renderMenuPicker() {
   $$(".new-only").forEach((node) => node.classList.remove("hidden"));
   if (state.currentTicket) {
     $("#ticketBanner").classList.remove("hidden");
-    $("#ticketBanner").innerHTML = `<strong>${state.currentTicket.table_no}</strong> · ${fmt(state.currentTicket.outstanding)} remaining · ${state.currentTicket.note || "No note"}`;
+    $("#ticketBanner").classList.toggle("settled", state.currentTicket.outstanding <= 0.009);
+    $("#ticketBanner").classList.toggle("open-ticket", state.currentTicket.outstanding > 0.009);
+    $("#ticketBanner").innerHTML = `<strong>${state.currentTicket.table_no}</strong> · ${fmt(state.currentTicket.outstanding)} remaining · ${state.currentTicket.outstanding <= 0.009 ? "Settled" : "Open"} · ${state.currentTicket.note || "No note"}`;
   } else {
     $("#ticketBanner").classList.add("hidden");
+    $("#ticketBanner").classList.remove("settled", "open-ticket");
   }
   state.menu.filter((item) => item.active).forEach((item) => {
     const existing = ticketItemByCode(item.code);
@@ -245,44 +249,40 @@ function renderMenuPicker() {
     list.appendChild(row);
   });
   renderSplits();
-  renderPaymentHistory();
   recalc();
 }
 
-function renderPaymentHistory() {
-  const root = $("#ticketPaymentHistory");
+function renderFinalizedSplits() {
+  const root = $("#splits");
   if (!root) return;
+  $$(".final-split", root).forEach((node) => node.remove());
   const ticket = state.currentTicket;
-  if (!ticket) {
-    root.innerHTML = "";
-    return;
-  }
+  if (!ticket) return;
   const payments = ticket.payments || [];
-  const paymentRows = payments.length
-    ? payments.map((payment) => {
-      const type = payment.split_type === "percent"
-        ? `${fmtQty(payment.split_percent)}%`
-        : "Items";
-      return `
-        <div class="payment-row">
+  const rows = payments
+    .filter((payment) => Number(payment.id) !== Number(state.editingPaymentId))
+    .map((payment) => {
+      const type = payment.split_type === "percent" ? `${fmtQty(payment.split_percent)}%` : "Items";
+      const status = ticket.outstanding <= 0.009 ? "settled" : "recorded";
+      const row = document.createElement("div");
+      row.className = "final-split";
+      row.innerHTML = `
+        <div class="final-split-main">
           <div>
             <strong>Split ${payment.split_no} · ${type} · ${payment.method}</strong>
             <span>${fmt(payment.subtotal)} due · ${fmt(payment.tip)} tip · ${fmt(payment.tendered)} tendered · ${fmt(payment.change)} change</span>
           </div>
-          <strong>${fmt(payment.total_with_tip)}</strong>
+          <div class="final-split-actions">
+            <strong>${fmt(payment.total_with_tip)}</strong>
+            <span class="status-pill ${status}">${status === "settled" ? "Settled" : "Recorded"}</span>
+            <button data-edit-payment="${payment.id}" type="button">Edit</button>
+          </div>
         </div>
       `;
-    }).join("")
-    : `<div class="empty">No payments recorded yet.</div>`;
-  root.innerHTML = `
-    <div class="surface-title tight"><h2>Recorded payments</h2></div>
-    <div class="payment-ledger-summary">
-      <div><span>Ticket total</span><strong>${fmt(ticket.subtotal)}</strong></div>
-      <div><span>Paid</span><strong>${fmt(ticket.paid_subtotal)}</strong></div>
-      <div><span>Remaining</span><strong>${fmt(ticket.outstanding)}</strong></div>
-    </div>
-    <div class="payment-list">${paymentRows}</div>
-  `;
+      $("[data-edit-payment]", row).addEventListener("click", () => editSavedPayment(payment.id));
+      return row;
+    });
+  rows.reverse().forEach((row) => root.prepend(row));
 }
 
 function renderTicketFilters() {
@@ -316,13 +316,25 @@ function renderTicketFilters() {
   });
 }
 
-function addSplit(markAsDirty = true) {
+function addSplit(markAsDirty = true, payment = null) {
   state.splitCount += 1;
   const node = $("#splitTemplate").content.firstElementChild.cloneNode(true);
   node.dataset.split = state.splitCount;
-  $("strong", node).textContent = `Split ${state.splitCount}`;
+  node.classList.add("editable-split");
+  const splitNo = payment?.split_no || ((state.currentTicket?.payments || []).length + state.splitCount);
+  node.dataset.splitNo = splitNo;
+  if (payment) {
+    node.dataset.paymentId = payment.id;
+    node.dataset.paymentAllocations = JSON.stringify(payment.allocations || []);
+  }
+  $("strong", node).textContent = payment ? `Split ${splitNo} (editing)` : `Split ${splitNo}`;
   $(".remove-split", node).addEventListener("click", () => {
     node.remove();
+    if (payment) {
+      state.editingPaymentId = null;
+      renderFinalizedSplits();
+      addSplit(false);
+    }
     recalc();
     markDirty();
   });
@@ -355,10 +367,33 @@ function addSplit(markAsDirty = true) {
     }
   });
   $("#splits").appendChild(node);
-  setSplitMode(node, "items");
+  setSplitMode(node, payment?.split_type || "items");
+  if (payment) {
+    $(".method", node).value = payment.method;
+    $(".split-percent", node).value = payment.split_percent || "";
+    $(".split-total", node).value = money(payment.total_with_tip).toFixed(2);
+    $(".split-tendered", node).value = money(payment.tendered).toFixed(2);
+  }
   renderAllocations(node);
+  if (payment?.split_type === "items") {
+    (payment.allocations || []).forEach((allocation) => {
+      const input = $(`.allocation input[data-code="${allocation.menu_code}"]`, node);
+      if (input) input.value = fmtQty(allocation.quantity);
+    });
+  }
   recalc();
   if (markAsDirty) markDirty();
+}
+
+function editSavedPayment(paymentId) {
+  if (paymentPayloads().length && !confirm("Discard the current unsaved split draft?")) return;
+  const payment = state.currentTicket?.payments?.find((row) => Number(row.id) === Number(paymentId));
+  if (!payment) return;
+  state.editingPaymentId = payment.id;
+  $$(".editable-split").forEach((node) => node.remove());
+  renderFinalizedSplits();
+  addSplit(false, payment);
+  recalc();
 }
 
 function splitMode(split) {
@@ -374,9 +409,10 @@ function setSplitMode(split, mode) {
 }
 
 function renderSplits() {
-  const splits = $$(".split");
+  renderFinalizedSplits();
+  const splits = $$(".editable-split");
   if (splits.length === 0) addSplit(false);
-  $$(".split").forEach(renderAllocations);
+  $$(".editable-split").forEach(renderAllocations);
 }
 
 function renderAllocations(split) {
@@ -388,15 +424,19 @@ function renderAllocations(split) {
   const previous = Object.fromEntries(
     $$(".allocation input", split).map((input) => [input.dataset.code, input.value])
   );
-  const items = payableItems();
+  const items = payableItemsForSplit(split);
   allocations.innerHTML = items.length
-    ? items.map((item) => `
-      <label class="allocation">
-        <span>${item.code}</span>
-        <input data-code="${item.code}" data-price="${item.price}" type="number" min="0" max="${item.quantity}" step="0.01" value="${previous[item.code] || 0}">
-        <small>of ${fmtQty(item.quantity)}</small>
-      </label>
-    `).join("")
+    ? items.map((item) => {
+      const savedQuantity = savedSplitQuantity(split, item.code);
+      const maxQuantity = item.quantity + savedQuantity;
+      return `
+        <label class="allocation">
+          <span>${item.code}</span>
+          <input data-code="${item.code}" data-price="${item.price}" type="number" min="0" max="${maxQuantity}" step="0.01" value="${previous[item.code] || 0}">
+          <small>of ${fmtQty(maxQuantity)}</small>
+        </label>
+      `;
+    }).join("")
     : `<div class="empty">Add items before taking payment.</div>`;
   $$("input", allocations).forEach((input) => {
     input.addEventListener("input", () => {
@@ -412,11 +452,46 @@ function renderAllocations(split) {
   });
 }
 
+function payableItemsForSplit(split) {
+  const items = payableItems();
+  if (!split.dataset.paymentAllocations) return items;
+  let allocations = [];
+  try {
+    allocations = JSON.parse(split.dataset.paymentAllocations);
+  } catch {
+    allocations = [];
+  }
+  allocations.forEach((allocation) => {
+    if (items.some((item) => item.code === allocation.menu_code)) return;
+    const ordered = ticketItemByCode(allocation.menu_code);
+    const menuItem = state.menu.find((item) => item.code === allocation.menu_code);
+    items.push({
+      code: allocation.menu_code,
+      name: ordered?.name || menuItem?.name || allocation.menu_code,
+      price: ordered?.unit_price || menuItem?.price || 0,
+      quantity: 0,
+    });
+  });
+  return items;
+}
+
+function savedSplitQuantity(split, code) {
+  if (!split.dataset.paymentAllocations) return 0;
+  try {
+    return JSON.parse(split.dataset.paymentAllocations)
+      .filter((allocation) => allocation.menu_code === code)
+      .reduce((sum, allocation) => sum + money(allocation.quantity), 0);
+  } catch {
+    return 0;
+  }
+}
+
 function splitData(row, index) {
   const mode = splitMode(row);
   const allocations = mode === "items" ? splitAllocations(row) : [];
   return {
-    split_no: index + 1,
+    split_no: Number(row.dataset.splitNo || index + 1),
+    payment_id: row.dataset.paymentId ? Number(row.dataset.paymentId) : null,
     split_type: mode,
     split_percent: mode === "percent" ? Math.max(0, money($(".split-percent", row).value)) : 0,
     method: $(".method", row).value,
@@ -452,7 +527,7 @@ function syncSplitAmountsToDue(row) {
 }
 
 function recalc() {
-  const itemSub = activeSubtotal();
+  const itemSub = draftBaseSubtotal();
   let draftSubtotal = 0;
   let tip = 0;
   let change = 0;
@@ -483,17 +558,29 @@ function recalc() {
   $("#orderChange").textContent = fmt(change);
 }
 
+function draftBaseSubtotal() {
+  const editedSubtotal = $$(".editable-split")
+    .map((row) => row.dataset.paymentId ? savedPaymentSubtotal(row.dataset.paymentId) : 0)
+    .reduce((sum, value) => sum + value, 0);
+  return activeSubtotal() + editedSubtotal;
+}
+
+function savedPaymentSubtotal(paymentId) {
+  const payment = state.currentTicket?.payments?.find((row) => Number(row.id) === Number(paymentId));
+  return money(payment?.subtotal);
+}
+
 function orderPayload() {
   return {
     table_no: $("#tableNo").value.trim(),
     note: $("#orderNote").value.trim(),
     items: activeItems().map((item) => ({ menu_code: item.code, quantity: item.quantity })),
-    payments: $$(".split").map(splitData).filter((payment) => payment.subtotal > 0 || payment.total_with_tip > 0),
+    payments: $$(".editable-split").map(splitData).filter((payment) => payment.subtotal > 0 || payment.total_with_tip > 0),
   };
 }
 
 function paymentPayloads() {
-  return $$(".split")
+  return $$(".editable-split")
     .map(splitData)
     .filter((payment) => payment.subtotal > 0 || payment.total_with_tip > 0);
 }
@@ -530,17 +617,27 @@ async function saveCurrentWork(
         }),
       });
       if (hasPayments) {
-        ticket = await api(`/api/orders/${state.currentTicket.id}/payments`, {
-          method: "POST",
-          body: JSON.stringify({ payments }),
-        });
+        const updates = payments.filter((payment) => payment.payment_id);
+        const additions = payments.filter((payment) => !payment.payment_id);
+        for (const payment of updates) {
+          ticket = await api(`/api/payments/${payment.payment_id}`, {
+            method: "PUT",
+            body: JSON.stringify(payment),
+          });
+        }
+        if (additions.length) {
+          ticket = await api(`/api/orders/${state.currentTicket.id}/payments`, {
+            method: "POST",
+            body: JSON.stringify({ payments: additions }),
+          });
+        }
       }
       state.currentTicket = ticket;
+      state.editingPaymentId = null;
       state.dirty = false;
       setStatus(`${autosave ? "Autosaved" : "Saved"} ticket #${ticket.id}`);
       upsertTicketTab(ticket);
       loadTicketIntoForm(ticket);
-      if (clearAfter && ticket.outstanding <= 0.009) closeTicketTab(ticket.id);
     } else {
       if (!hasTicketDraft()) {
         state.dirty = false;
@@ -603,6 +700,7 @@ function clearOrder() {
 
 function loadTicketIntoForm(ticket) {
   state.currentTicket = ticket;
+  state.editingPaymentId = null;
   state.quantities = {};
   state.menu.forEach((item) => { state.quantities[item.code] = 0; });
   ticket.items.forEach((item) => { state.quantities[item.menu_code] = item.quantity; });
@@ -643,7 +741,7 @@ async function renderTickets() {
   const filterQuery = itemFilters ? `&${itemFilters}` : "";
   const tickets = await api(`/api/tickets?q=${q}&open=${open}${filterQuery}`);
   $("#ticketList").innerHTML = tickets.length ? tickets.map((ticket) => `
-    <div class="ticket-row">
+    <div class="ticket-row ${ticket.outstanding <= 0.009 ? "settled" : "open-ticket"}">
       <div>
         <strong>#${ticket.id} · ${ticket.table_no} · ${fmt(ticket.outstanding)} due</strong>
         <span>${ticket.items || "No items"}${ticket.note ? ` · ${ticket.note}` : ""}</span>

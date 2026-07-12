@@ -120,6 +120,14 @@ h2 {
   font-weight: 650;
 }
 
+.ticket-tab-wrap.settled {
+  background: #f1faf1;
+}
+
+.ticket-tab-wrap.settled .ticket-tab span {
+  color: #107c10;
+}
+
 .ticket-tab-wrap.active .ticket-tab {
   color: inherit;
   font-weight: inherit;
@@ -264,6 +272,18 @@ input[readonly] {
   margin-bottom: 12px;
 }
 
+.banner.settled {
+  border-color: #9fd89f;
+  background: #f1faf1;
+  color: #0b5a08;
+}
+
+.banner.open-ticket {
+  border-color: #f3d19e;
+  background: #fff8f0;
+  color: var(--warn);
+}
+
 .menu-list,
 .splits,
 .ticket-list,
@@ -311,6 +331,15 @@ input[readonly] {
   display: block;
   color: var(--muted);
   font-size: 13px;
+}
+
+.ticket-row.settled {
+  border-color: #b7dfb7;
+  background: #f7fbf7;
+}
+
+.ticket-row.open-ticket {
+  border-color: #f3d19e;
 }
 
 .event-row small {
@@ -455,6 +484,51 @@ input[readonly] {
   border-radius: var(--radius);
   background: var(--surface-2);
   padding: 12px;
+}
+
+.final-split {
+  border: 1px solid #d6e3d6;
+  border-radius: var(--radius);
+  background: #f7fbf7;
+  padding: 12px;
+}
+
+.final-split-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.final-split-main span {
+  display: block;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.final-split-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.status-pill {
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.status-pill.recorded {
+  background: #eff6fc;
+  color: var(--accent);
+}
+
+.status-pill.settled {
+  background: #e4f6e4;
+  color: #107c10;
 }
 
 .split-head > div {
@@ -610,6 +684,7 @@ input[readonly] {
   .ticket-filters,
   .menu-row,
   .ticket-row,
+  .final-split-main,
   .payment-row,
   .sold-row,
   .event-row,
@@ -620,5 +695,14 @@ input[readonly] {
 
   .qty-control {
     grid-template-columns: 42px minmax(70px, 1fr) 42px;
+  }
+
+  .final-split-main {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .final-split-actions {
+    justify-content: flex-start;
   }
 }

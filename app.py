@@ -258,6 +258,22 @@ def order_payload(conn: sqlite3.Connection, order_id: int) -> dict:
         """,
         (order_id,),
     )
+    payment_allocations = rows(
+        conn,
+        """
+        SELECT pa.payment_id, pa.menu_code, pa.quantity, pa.amount
+        FROM payment_allocations pa
+        JOIN payments p ON p.id = pa.payment_id
+        WHERE p.order_id = ?
+        ORDER BY pa.id
+        """,
+        (order_id,),
+    )
+    allocations_by_payment: dict[int, list[dict]] = {}
+    for allocation in payment_allocations:
+        allocations_by_payment.setdefault(int(allocation["payment_id"]), []).append(allocation)
+    for payment in payload["payments"]:
+        payment["allocations"] = allocations_by_payment.get(int(payment["id"]), [])
     payload["subtotal"] = round(sum(item["line_total"] for item in payload["items"]), 2)
     payload["total_with_tip"] = round(
         sum(payment["total_with_tip"] for payment in payload["payments"]), 2
@@ -702,6 +718,66 @@ def add_payments(conn: sqlite3.Connection, order_id: int, data: dict) -> None:
                 )
 
 
+def update_payment(conn: sqlite3.Connection, payment_id: int, data: dict) -> int:
+    row = conn.execute(
+        """
+        SELECT p.order_id, o.event_id
+        FROM payments p
+        JOIN orders o ON o.id = p.order_id
+        WHERE p.id = ?
+        """,
+        (payment_id,),
+    ).fetchone()
+    if not row:
+        raise KeyError("Payment not found")
+    if int(row["event_id"]) != active_event_id(conn):
+        raise ValueError("Only the active event can be edited.")
+    _, payments = validate_order(
+        {"items": [{"menu_code": "placeholder", "quantity": 1}], "payments": [data]}
+    )
+    if not payments:
+        raise ValueError("Payment is empty.")
+    payment = payments[0]
+    conn.execute(
+        """
+        UPDATE payments
+        SET split_type = ?,
+            split_percent = ?,
+            method = ?,
+            subtotal = ?,
+            total_with_tip = ?,
+            tendered = ?,
+            note = ?
+        WHERE id = ?
+        """,
+        (
+            payment["split_type"],
+            payment["split_percent"],
+            payment["method"],
+            payment["subtotal"],
+            payment["total_with_tip"],
+            payment["tendered"],
+            payment["note"],
+            payment_id,
+        ),
+    )
+    conn.execute("DELETE FROM payment_allocations WHERE payment_id = ?", (payment_id,))
+    for allocation in payment["allocations"]:
+        code = str(allocation.get("menu_code", "")).strip()
+        qty = money(allocation.get("quantity"))
+        amount = money(allocation.get("amount"))
+        if code and qty > 0:
+            conn.execute(
+                """
+                INSERT INTO payment_allocations
+                  (payment_id, menu_code, quantity, amount)
+                VALUES (?, ?, ?, ?)
+                """,
+                (payment_id, code, qty, amount),
+            )
+    return int(row["order_id"])
+
+
 def active_menu(conn: sqlite3.Connection) -> list[dict]:
     return rows(
         conn,
@@ -954,6 +1030,17 @@ class Handler(BaseHTTPRequestHandler):
                     conn.commit()
                     self.json(item)
             except ValueError as exc:
+                self.error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path.startswith("/api/payments/"):
+            try:
+                payment_id = int(parsed.path.rsplit("/", 1)[1])
+                data = self.read_json()
+                with connect() as conn:
+                    order_id = update_payment(conn, payment_id, data)
+                    conn.commit()
+                    self.json(order_payload(conn, order_id))
+            except (ValueError, KeyError) as exc:
                 self.error(HTTPStatus.BAD_REQUEST, str(exc))
             return
         if parsed.path.startswith("/api/orders/"):

@@ -269,6 +269,7 @@ input[readonly] {
 .ticket-list,
 .ticket-filters,
 .menu-editor,
+.payment-list,
 .sold-list,
 .event-list {
   display: grid;
@@ -286,6 +287,7 @@ input[readonly] {
 
 .menu-row,
 .ticket-row,
+.payment-row,
 .sold-row,
 .event-row,
 .editor-row,
@@ -302,6 +304,7 @@ input[readonly] {
 
 .menu-row span,
 .ticket-row span,
+.payment-row span,
 .sold-row span,
 .event-row span,
 .filter-row span {
@@ -395,9 +398,40 @@ input[readonly] {
 
 .payment-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: 10px;
   margin-top: 12px;
+}
+
+.payment-history {
+  margin-top: 16px;
+}
+
+.payment-ledger-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.payment-ledger-summary > div {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 10px;
+}
+
+.payment-ledger-summary span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.payment-ledger-summary strong {
+  display: block;
+  font-size: 18px;
+  margin-top: 2px;
 }
 
 .split-summary {
@@ -545,6 +579,7 @@ input[readonly] {
   .metrics,
   .metrics.compact,
   .payment-summary,
+  .payment-ledger-summary,
   .split-summary,
   .allocations,
   .ticket-filters {
@@ -569,11 +604,13 @@ input[readonly] {
   .metrics,
   .metrics.compact,
   .payment-summary,
+  .payment-ledger-summary,
   .split-summary,
   .allocations,
   .ticket-filters,
   .menu-row,
   .ticket-row,
+  .payment-row,
   .sold-row,
   .event-row,
   .filter-row,

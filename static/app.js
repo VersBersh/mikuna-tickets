@@ -245,7 +245,44 @@ function renderMenuPicker() {
     list.appendChild(row);
   });
   renderSplits();
+  renderPaymentHistory();
   recalc();
+}
+
+function renderPaymentHistory() {
+  const root = $("#ticketPaymentHistory");
+  if (!root) return;
+  const ticket = state.currentTicket;
+  if (!ticket) {
+    root.innerHTML = "";
+    return;
+  }
+  const payments = ticket.payments || [];
+  const paymentRows = payments.length
+    ? payments.map((payment) => {
+      const type = payment.split_type === "percent"
+        ? `${fmtQty(payment.split_percent)}%`
+        : "Items";
+      return `
+        <div class="payment-row">
+          <div>
+            <strong>Split ${payment.split_no} · ${type} · ${payment.method}</strong>
+            <span>${fmt(payment.subtotal)} due · ${fmt(payment.tip)} tip · ${fmt(payment.tendered)} tendered · ${fmt(payment.change)} change</span>
+          </div>
+          <strong>${fmt(payment.total_with_tip)}</strong>
+        </div>
+      `;
+    }).join("")
+    : `<div class="empty">No payments recorded yet.</div>`;
+  root.innerHTML = `
+    <div class="surface-title tight"><h2>Recorded payments</h2></div>
+    <div class="payment-ledger-summary">
+      <div><span>Ticket total</span><strong>${fmt(ticket.subtotal)}</strong></div>
+      <div><span>Paid</span><strong>${fmt(ticket.paid_subtotal)}</strong></div>
+      <div><span>Remaining</span><strong>${fmt(ticket.outstanding)}</strong></div>
+    </div>
+    <div class="payment-list">${paymentRows}</div>
+  `;
 }
 
 function renderTicketFilters() {
@@ -416,6 +453,7 @@ function syncSplitAmountsToDue(row) {
 
 function recalc() {
   const itemSub = activeSubtotal();
+  let draftSubtotal = 0;
   let tip = 0;
   let change = 0;
   let totalWithTip = 0;
@@ -433,11 +471,13 @@ function recalc() {
     $(".split-due", row).textContent = fmt(subtotal);
     $(".split-tip", row).textContent = fmt(splitTip);
     $(".split-change", row).textContent = fmt(splitChange);
+    draftSubtotal += subtotal;
     tip += splitTip;
     change += splitChange;
     totalWithTip += splitTotal;
   });
   $("#orderSubtotal").textContent = fmt(itemSub);
+  $("#orderRemainingAfterDraft").textContent = fmt(Math.max(0, itemSub - draftSubtotal));
   $("#orderTips").textContent = fmt(tip);
   $("#orderTotal").textContent = fmt(totalWithTip);
   $("#orderChange").textContent = fmt(change);

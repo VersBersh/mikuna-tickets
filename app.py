@@ -778,6 +778,24 @@ def update_payment(conn: sqlite3.Connection, payment_id: int, data: dict) -> int
     return int(row["order_id"])
 
 
+def delete_payment(conn: sqlite3.Connection, payment_id: int) -> int:
+    row = conn.execute(
+        """
+        SELECT p.order_id, o.event_id
+        FROM payments p
+        JOIN orders o ON o.id = p.order_id
+        WHERE p.id = ?
+        """,
+        (payment_id,),
+    ).fetchone()
+    if not row:
+        raise KeyError("Payment not found")
+    if int(row["event_id"]) != active_event_id(conn):
+        raise ValueError("Only the active event can be edited.")
+    conn.execute("DELETE FROM payments WHERE id = ?", (payment_id,))
+    return int(row["order_id"])
+
+
 def active_menu(conn: sqlite3.Connection) -> list[dict]:
     return rows(
         conn,
@@ -1065,6 +1083,16 @@ class Handler(BaseHTTPRequestHandler):
                 normalize_active_menu_order(conn)
                 conn.commit()
             self.json({"ok": True})
+            return
+        if parsed.path.startswith("/api/payments/"):
+            try:
+                payment_id = int(parsed.path.rsplit("/", 1)[1])
+                with connect() as conn:
+                    order_id = delete_payment(conn, payment_id)
+                    conn.commit()
+                    self.json(order_payload(conn, order_id))
+            except (ValueError, KeyError) as exc:
+                self.error(HTTPStatus.BAD_REQUEST, str(exc))
             return
         if parsed.path.startswith("/api/orders/"):
             try:

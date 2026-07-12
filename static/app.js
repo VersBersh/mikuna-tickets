@@ -328,13 +328,24 @@ function addSplit(markAsDirty = true, payment = null) {
     node.dataset.paymentAllocations = JSON.stringify(payment.allocations || []);
   }
   $("strong", node).textContent = payment ? `Split ${splitNo} (editing)` : `Split ${splitNo}`;
-  $(".remove-split", node).addEventListener("click", () => {
-    node.remove();
+  $(".remove-split", node).addEventListener("click", async () => {
     if (payment) {
-      state.editingPaymentId = null;
-      renderFinalizedSplits();
-      addSplit(false);
+      if (!confirm("Remove this saved split?")) return;
+      try {
+        const ticket = await api(`/api/payments/${payment.id}`, { method: "DELETE" });
+        state.currentTicket = ticket;
+        state.editingPaymentId = null;
+        state.dirty = false;
+        upsertTicketTab(ticket);
+        loadTicketIntoForm(ticket);
+        await refreshAll();
+        setStatus(`Removed split ${payment.split_no}`);
+      } catch (error) {
+        setStatus(error.message);
+      }
+      return;
     }
+    node.remove();
     renderSplits();
     recalc();
     markDirty();

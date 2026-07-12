@@ -377,15 +377,7 @@ function renderAllocations(split) {
 
 function splitData(row, index) {
   const mode = splitMode(row);
-  const allocations = mode === "items"
-    ? $$(".allocation input", row)
-      .map((input) => ({
-        menu_code: input.dataset.code,
-        quantity: Math.min(money(input.value), money(input.max)),
-        amount: Math.min(money(input.value), money(input.max)) * money(input.dataset.price),
-      }))
-      .filter((item) => item.quantity > 0)
-    : [];
+  const allocations = mode === "items" ? splitAllocations(row) : [];
   return {
     split_no: index + 1,
     split_type: mode,
@@ -398,11 +390,21 @@ function splitData(row, index) {
   };
 }
 
+function splitAllocations(row) {
+  return $$(".allocation input", row)
+    .map((input) => ({
+      menu_code: input.dataset.code,
+      quantity: Math.min(money(input.value), money(input.max)),
+      amount: Math.min(money(input.value), money(input.max)) * money(input.dataset.price),
+    }))
+    .filter((item) => item.quantity > 0);
+}
+
 function splitSubtotal(row) {
   if (splitMode(row) === "percent") {
     return billSubtotal() * Math.max(0, money($(".split-percent", row).value)) / 100;
   }
-  return splitData(row, 0).allocations.reduce((sum, item) => sum + item.amount, 0);
+  return splitAllocations(row).reduce((sum, item) => sum + item.amount, 0);
 }
 
 function syncSplitAmountsToDue(row) {

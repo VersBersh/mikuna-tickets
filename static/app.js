@@ -217,6 +217,7 @@ function recalc() {
   const itemSub = activeSubtotal();
   let tip = 0;
   let change = 0;
+  let totalWithTip = 0;
   $$(".split").forEach((row, index) => {
     const subtotal = splitData(row, index).allocations.reduce((sum, item) => sum + item.amount, 0);
     const subtotalInput = $(".split-subtotal", row);
@@ -225,11 +226,19 @@ function recalc() {
     if (!subtotalInput.matches(":focus")) subtotalInput.value = subtotal.toFixed(2);
     if (money(totalInput.value) < subtotal && !totalInput.matches(":focus")) totalInput.value = subtotal.toFixed(2);
     if (money(tenderedInput.value) < money(totalInput.value) && !tenderedInput.matches(":focus")) tenderedInput.value = money(totalInput.value).toFixed(2);
-    tip += money(totalInput.value) - subtotal;
-    change += Math.max(0, money(tenderedInput.value) - money(totalInput.value));
+    const splitTotal = money(totalInput.value);
+    const splitTip = splitTotal - subtotal;
+    const splitChange = Math.max(0, money(tenderedInput.value) - splitTotal);
+    $(".split-due", row).textContent = fmt(subtotal);
+    $(".split-tip", row).textContent = fmt(splitTip);
+    $(".split-change", row).textContent = fmt(splitChange);
+    tip += splitTip;
+    change += splitChange;
+    totalWithTip += splitTotal;
   });
   $("#orderSubtotal").textContent = fmt(itemSub);
   $("#orderTips").textContent = fmt(tip);
+  $("#orderTotal").textContent = fmt(totalWithTip);
   $("#orderChange").textContent = fmt(change);
 }
 

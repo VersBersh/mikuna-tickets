@@ -51,12 +51,13 @@
               <h2 id="paymentTitle">Payment</h2>
               <button id="addSplit" type="button">Add split</button>
             </div>
-            <div class="metrics compact">
-              <div><span>Items due</span><strong id="orderSubtotal">$0.00</strong></div>
+            <div id="splits" class="splits"></div>
+            <div class="payment-summary">
+              <div><span>Total due</span><strong id="orderSubtotal">$0.00</strong></div>
               <div><span>Tips</span><strong id="orderTips">$0.00</strong></div>
+              <div><span>Total with tip</span><strong id="orderTotal">$0.00</strong></div>
               <div><span>Change</span><strong id="orderChange">$0.00</strong></div>
             </div>
-            <div id="splits" class="splits"></div>
           </section>
         </div>
       </section>
@@ -154,6 +155,11 @@
           <label class="field"><span>Subtotal</span><input class="split-subtotal" type="number" min="0" step="0.01"></label>
           <label class="field"><span>Total with tip</span><input class="split-total" type="number" min="0" step="0.01"></label>
           <label class="field"><span>Tendered</span><input class="split-tendered" type="number" min="0" step="0.01"></label>
+        </div>
+        <div class="split-summary">
+          <div><span>Split due</span><strong class="split-due">$0.00</strong></div>
+          <div><span>Tip</span><strong class="split-tip">$0.00</strong></div>
+          <div><span>Change</span><strong class="split-change">$0.00</strong></div>
         </div>
       </div>
     </template>

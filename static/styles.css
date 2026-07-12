@@ -302,24 +302,53 @@ select:focus {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.metrics > div {
+.metrics > div,
+.payment-summary > div,
+.split-summary > div {
   border: 1px solid var(--line-soft);
   border-radius: var(--radius);
   background: var(--surface-2);
   padding: 10px;
 }
 
-.metrics span {
+.metrics span,
+.payment-summary span,
+.split-summary span {
   display: block;
   color: var(--muted);
   font-size: 12px;
   font-weight: 650;
 }
 
-.metrics strong {
+.metrics strong,
+.payment-summary strong,
+.split-summary strong {
   display: block;
   font-size: 18px;
   margin-top: 2px;
+}
+
+.payment-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.split-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.split-summary > div {
+  background: var(--surface);
+  padding: 8px;
+}
+
+.split-change {
+  color: var(--accent);
 }
 
 .split {
@@ -432,6 +461,8 @@ select:focus {
   .cash-settings,
   .metrics,
   .metrics.compact,
+  .payment-summary,
+  .split-summary,
   .allocations,
   .ticket-filters {
     grid-template-columns: 1fr 1fr;
@@ -454,6 +485,8 @@ select:focus {
   .cash-settings,
   .metrics,
   .metrics.compact,
+  .payment-summary,
+  .split-summary,
   .allocations,
   .ticket-filters,
   .menu-row,

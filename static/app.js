@@ -426,6 +426,10 @@ function setSplitMode(split, mode) {
 }
 
 function renderSplits() {
+  if (!state.currentTicket) {
+    $("#splits").innerHTML = "";
+    return;
+  }
   renderFinalizedSplits();
   const splits = $$(".editable-split");
   if (splits.length === 0) addSplit(false);
@@ -641,11 +645,12 @@ function orderPayload() {
     table_no: $("#tableNo").value.trim(),
     note: $("#orderNote").value.trim(),
     items: activeItems().map((item) => ({ menu_code: item.code, quantity: item.quantity })),
-    payments: $$(".editable-split").map(splitData).filter((payment) => payment.subtotal > 0 || payment.total_with_tip > 0),
+    payments: state.currentTicket ? paymentPayloads() : [],
   };
 }
 
 function paymentPayloads() {
+  if (!state.currentTicket) return [];
   return $$(".editable-split")
     .map(splitData)
     .filter((payment) => payment.subtotal > 0 || payment.total_with_tip > 0);
@@ -758,7 +763,6 @@ function clearOrder() {
   $("#orderNote").value = "";
   $("#splits").innerHTML = "";
   state.splitCount = 0;
-  addSplit(false);
   renderMenuPicker();
   recalc();
   renderTicketTabs();
@@ -999,7 +1003,6 @@ async function refreshAll() {
 
 async function start() {
   await loadMenu();
-  addSplit(false);
   await refreshAll();
   setStatus("Ready");
 }

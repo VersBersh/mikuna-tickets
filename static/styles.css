@@ -266,6 +266,13 @@ select:focus {
   justify-content: flex-end;
 }
 
+.title-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .qty-control {
   display: grid;
   grid-template-columns: 38px 62px 38px;

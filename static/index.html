@@ -12,7 +12,6 @@
         <h1>Mikuna Receipts</h1>
         <p id="status">Loading...</p>
       </div>
-      <button class="accent" id="saveAction" type="button">Save ticket</button>
     </header>
 
     <nav class="tabs" aria-label="Main views">
@@ -27,10 +26,13 @@
     <main class="content">
       <section class="view active" id="view-order">
         <div class="grid two">
-          <section class="surface" id="paymentSurface">
+          <section class="surface" id="ticketSurface">
             <div class="surface-title">
               <h2 id="orderTitle">New ticket</h2>
-              <button id="clearOrder" type="button">Clear</button>
+              <div class="title-actions">
+                <button id="clearOrder" type="button">Clear</button>
+                <button class="accent" id="saveAction" type="button">Save ticket</button>
+              </div>
             </div>
             <div id="ticketBanner" class="banner hidden"></div>
             <label class="field new-only">
@@ -44,7 +46,7 @@
             </label>
           </section>
 
-          <section class="surface">
+          <section class="surface" id="paymentSurface">
             <div class="surface-title">
               <h2 id="paymentTitle">Payment</h2>
               <button id="addSplit" type="button">Add split</button>

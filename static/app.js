@@ -8,6 +8,7 @@ const state = {
   dirty: false,
   autosaveTimer: null,
   autosaveInFlight: false,
+  menuSaveTimers: {},
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -624,7 +625,7 @@ async function renderTickets() {
 
 function renderMenuEditor() {
   $("#menuEditor").innerHTML = state.menu.map((item, index) => `
-    <div class="editor-row">
+    <div class="editor-row" data-menu-row="${item.code}">
       <input class="edit-code" value="${item.code}" disabled>
       <input class="edit-name" value="${item.name}">
       <input class="edit-price" type="number" min="0" step="0.01" value="${item.price}">
@@ -632,10 +633,13 @@ function renderMenuEditor() {
         <button class="icon-button" data-move-menu-code="${item.code}" data-direction="-1" type="button" title="Move up" aria-label="Move item up" ${index === 0 ? "disabled" : ""}>&#9650;</button>
         <button class="icon-button" data-move-menu-code="${item.code}" data-direction="1" type="button" title="Move down" aria-label="Move item down" ${index === state.menu.length - 1 ? "disabled" : ""}>&#9660;</button>
       </div>
-      <button data-save-menu="${item.code}" type="button">Save</button>
       <button class="danger" data-delete-menu="${item.code}" type="button">Delete</button>
     </div>
   `).join("");
+  $$(".edit-name, .edit-price").forEach((input) => {
+    input.addEventListener("input", () => scheduleMenuItemSave(input.closest(".editor-row")));
+    input.addEventListener("blur", () => saveMenuRow(input.closest(".editor-row")));
+  });
   $$("[data-move-menu-code]").forEach((button) => {
     button.addEventListener("click", async () => {
       try {
@@ -655,22 +659,40 @@ function renderMenuEditor() {
       }
     });
   });
-  $$("[data-save-menu]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const row = button.closest(".editor-row");
-      await api(`/api/menu/${button.dataset.saveMenu}`, {
-        method: "PUT",
-        body: JSON.stringify({ name: $(".edit-name", row).value, price: $(".edit-price", row).value }),
-      });
-      await loadMenu();
-    });
-  });
   $$("[data-delete-menu]").forEach((button) => {
     button.addEventListener("click", async () => {
       await api(`/api/menu/${button.dataset.deleteMenu}`, { method: "DELETE" });
       await loadMenu();
     });
   });
+}
+
+function scheduleMenuItemSave(row) {
+  const code = row.dataset.menuRow;
+  window.clearTimeout(state.menuSaveTimers[code]);
+  state.menuSaveTimers[code] = window.setTimeout(() => saveMenuRow(row), 700);
+  setStatus(`Saving ${code}...`);
+}
+
+async function saveMenuRow(row) {
+  const code = row?.dataset.menuRow;
+  if (!code) return;
+  window.clearTimeout(state.menuSaveTimers[code]);
+  delete state.menuSaveTimers[code];
+  const name = $(".edit-name", row).value.trim();
+  const price = $(".edit-price", row).value;
+  if (!name || price === "") return;
+  try {
+    const item = await api(`/api/menu/${code}`, {
+      method: "PUT",
+      body: JSON.stringify({ name, price }),
+    });
+    const index = state.menu.findIndex((menuItem) => menuItem.code === code);
+    if (index >= 0) state.menu[index] = item;
+    setStatus(`Saved ${code}`);
+  } catch (error) {
+    setStatus(error.message);
+  }
 }
 
 async function addMenuItem() {

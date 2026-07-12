@@ -188,6 +188,15 @@ function activeSubtotal() {
   return payableItems().reduce((sum, item) => sum + item.quantity * item.price, 0);
 }
 
+function billSubtotal() {
+  return state.menu.reduce((sum, item) => {
+    const existing = ticketItemByCode(item.code);
+    const quantity = state.quantities[item.code] || 0;
+    const price = existing?.unit_price || item.price;
+    return sum + quantity * price;
+  }, 0);
+}
+
 function renderMenuPicker() {
   const list = $("#menuList");
   list.innerHTML = "";
@@ -284,37 +293,46 @@ function addSplit(markAsDirty = true) {
       const input = $(`.allocation input[data-code="${item.code}"]`, node);
       if (input) input.value = fmtQty(item.quantity);
     });
-    syncSplitAmountsToAllocations(node);
+    syncSplitAmountsToDue(node);
     recalc();
     markDirty();
   });
-  $(".apply-percent", node).addEventListener("click", () => {
-    applySplitPercent(node);
+  $(".split-mode", node).addEventListener("change", () => {
+    setSplitMode(node, $(".split-mode", node).value);
+    syncSplitAmountsToDue(node);
+    recalc();
+    markDirty();
   });
-  $(".split-percent", node).addEventListener("change", () => {
-    applySplitPercent(node);
+  $(".split-percent", node).addEventListener("input", () => {
+    syncSplitAmountsToDue(node);
+    recalc();
+    markDirty();
   });
   $(".split-percent", node).addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
-      applySplitPercent(node);
+      syncSplitAmountsToDue(node);
+      recalc();
+      markDirty();
     }
   });
   $("#splits").appendChild(node);
+  setSplitMode(node, "items");
   renderAllocations(node);
   recalc();
   if (markAsDirty) markDirty();
 }
 
-function applySplitPercent(split) {
-  const ratio = Math.max(0, money($(".split-percent", split).value)) / 100;
-  payableItems().forEach((item) => {
-    const input = $(`.allocation input[data-code="${item.code}"]`, split);
-    if (input) input.value = fmtQty(Math.min(item.quantity, item.quantity * ratio));
-  });
-  syncSplitAmountsToAllocations(split);
-  recalc();
-  markDirty();
+function splitMode(split) {
+  return $(".split-mode", split)?.value || "items";
+}
+
+function setSplitMode(split, mode) {
+  $(".split-mode", split).value = mode;
+  split.dataset.mode = mode;
+  $(".percent-field", split).classList.toggle("hidden", mode !== "percent");
+  $(".fill-split", split).classList.toggle("hidden", mode !== "items");
+  renderAllocations(split);
 }
 
 function renderSplits() {
@@ -325,6 +343,10 @@ function renderSplits() {
 
 function renderAllocations(split) {
   const allocations = $(".allocations", split);
+  if (splitMode(split) === "percent") {
+    allocations.innerHTML = `<div class="empty">Percent split applies to the whole bill.</div>`;
+    return;
+  }
   const previous = Object.fromEntries(
     $$(".allocation input", split).map((input) => [input.dataset.code, input.value])
   );
@@ -353,15 +375,20 @@ function renderAllocations(split) {
 }
 
 function splitData(row, index) {
-  const allocations = $$(".allocation input", row)
-    .map((input) => ({
-      menu_code: input.dataset.code,
-      quantity: Math.min(money(input.value), money(input.max)),
-      amount: Math.min(money(input.value), money(input.max)) * money(input.dataset.price),
-    }))
-    .filter((item) => item.quantity > 0);
+  const mode = splitMode(row);
+  const allocations = mode === "items"
+    ? $$(".allocation input", row)
+      .map((input) => ({
+        menu_code: input.dataset.code,
+        quantity: Math.min(money(input.value), money(input.max)),
+        amount: Math.min(money(input.value), money(input.max)) * money(input.dataset.price),
+      }))
+      .filter((item) => item.quantity > 0)
+    : [];
   return {
     split_no: index + 1,
+    split_type: mode,
+    split_percent: mode === "percent" ? Math.max(0, money($(".split-percent", row).value)) : 0,
     method: $(".method", row).value,
     subtotal: money($(".split-subtotal", row).value),
     total_with_tip: money($(".split-total", row).value),
@@ -370,12 +397,15 @@ function splitData(row, index) {
   };
 }
 
-function splitAllocationSubtotal(row) {
+function splitSubtotal(row) {
+  if (splitMode(row) === "percent") {
+    return billSubtotal() * Math.max(0, money($(".split-percent", row).value)) / 100;
+  }
   return splitData(row, 0).allocations.reduce((sum, item) => sum + item.amount, 0);
 }
 
-function syncSplitAmountsToAllocations(row) {
-  const subtotal = splitAllocationSubtotal(row).toFixed(2);
+function syncSplitAmountsToDue(row) {
+  const subtotal = splitSubtotal(row).toFixed(2);
   $(".split-subtotal", row).value = subtotal;
   $(".split-total", row).value = subtotal;
   $(".split-tendered", row).value = subtotal;
@@ -387,7 +417,7 @@ function recalc() {
   let change = 0;
   let totalWithTip = 0;
   $$(".split").forEach((row, index) => {
-    const subtotal = splitData(row, index).allocations.reduce((sum, item) => sum + item.amount, 0);
+    const subtotal = splitSubtotal(row);
     const subtotalInput = $(".split-subtotal", row);
     const totalInput = $(".split-total", row);
     const tenderedInput = $(".split-tendered", row);

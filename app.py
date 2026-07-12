@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS payments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
     split_no INTEGER NOT NULL DEFAULT 1,
+    split_type TEXT NOT NULL DEFAULT 'items' CHECK (split_type IN ('items', 'percent')),
+    split_percent REAL NOT NULL DEFAULT 0 CHECK (split_percent >= 0),
     method TEXT NOT NULL CHECK (method IN ('cash', 'paypal')),
     subtotal REAL NOT NULL CHECK (subtotal >= 0),
     total_with_tip REAL NOT NULL CHECK (total_with_tip >= 0),
@@ -177,6 +179,11 @@ def ensure_event_state(conn: sqlite3.Connection) -> None:
     item_columns = table_columns(conn, "order_items")
     if "menu_name" not in item_columns:
         conn.execute("ALTER TABLE order_items ADD COLUMN menu_name TEXT NOT NULL DEFAULT ''")
+    payment_columns = table_columns(conn, "payments")
+    if "split_type" not in payment_columns:
+        conn.execute("ALTER TABLE payments ADD COLUMN split_type TEXT NOT NULL DEFAULT 'items'")
+    if "split_percent" not in payment_columns:
+        conn.execute("ALTER TABLE payments ADD COLUMN split_percent REAL NOT NULL DEFAULT 0")
     conn.execute(
         """
         UPDATE order_items
@@ -241,7 +248,7 @@ def order_payload(conn: sqlite3.Connection, order_id: int) -> dict:
     payload["payments"] = rows(
         conn,
         """
-        SELECT id, split_no, method, subtotal, total_with_tip, tendered,
+        SELECT id, split_no, split_type, split_percent, method, subtotal, total_with_tip, tendered,
                ROUND(total_with_tip - subtotal, 2) AS tip,
                ROUND(tendered - total_with_tip, 2) AS change,
                note
@@ -281,17 +288,23 @@ def remaining_items(conn: sqlite3.Connection, order_id: int) -> list[dict]:
           JOIN payments p ON p.id = pa.payment_id
           WHERE p.order_id = ?
           GROUP BY pa.menu_code
+        ),
+        percent_paid AS (
+          SELECT COALESCE(SUM(split_percent), 0) / 100.0 AS ratio
+          FROM payments
+          WHERE order_id = ? AND split_type = 'percent'
         )
         SELECT ordered.menu_code, ordered.name, ordered.unit_price,
                ordered.quantity,
-               COALESCE(paid.quantity, 0) AS paid_quantity,
-               ROUND(ordered.quantity - COALESCE(paid.quantity, 0), 2) AS remaining_quantity,
-               ROUND((ordered.quantity - COALESCE(paid.quantity, 0)) * ordered.unit_price, 2) AS remaining_amount
+               ROUND(MIN(ordered.quantity, COALESCE(paid.quantity, 0) + ordered.quantity * percent_paid.ratio), 2) AS paid_quantity,
+               ROUND(MAX(0, ordered.quantity - (COALESCE(paid.quantity, 0) + ordered.quantity * percent_paid.ratio)), 2) AS remaining_quantity,
+               ROUND(MAX(0, ordered.quantity - (COALESCE(paid.quantity, 0) + ordered.quantity * percent_paid.ratio)) * ordered.unit_price, 2) AS remaining_amount
         FROM ordered
         LEFT JOIN paid ON paid.menu_code = ordered.menu_code
+        CROSS JOIN percent_paid
         ORDER BY ordered.menu_code
         """,
-        (order_id, order_id),
+        (order_id, order_id, order_id),
     )
 
 
@@ -477,7 +490,15 @@ def validate_order(data: dict) -> tuple[list[dict], list[dict]]:
         subtotal = money(payment.get("subtotal"))
         total = money(payment.get("total_with_tip"))
         tendered = money(payment.get("tendered"))
+        split_type = str(payment.get("split_type") or "items").strip()
+        split_percent = money(payment.get("split_percent"))
         method = payment.get("method") or "cash"
+        if split_type not in ("items", "percent"):
+            raise ValueError("Split type must be items or percent.")
+        if split_type == "items":
+            split_percent = 0
+        if split_type == "percent" and split_percent <= 0:
+            raise ValueError("Percent split must be greater than 0.")
         if method not in ("cash", "paypal"):
             raise ValueError("Payment method must be cash or paypal.")
         if total <= 0 and subtotal <= 0 and tendered <= 0:
@@ -489,6 +510,8 @@ def validate_order(data: dict) -> tuple[list[dict], list[dict]]:
         payments.append(
             {
                 "split_no": int(payment.get("split_no") or index),
+                "split_type": split_type,
+                "split_percent": split_percent,
                 "method": method,
                 "subtotal": subtotal,
                 "total_with_tip": total,
@@ -536,12 +559,14 @@ def create_order(conn: sqlite3.Connection, data: dict) -> int:
         cur = conn.execute(
             """
             INSERT INTO payments
-              (order_id, split_no, method, subtotal, total_with_tip, tendered, note)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+              (order_id, split_no, split_type, split_percent, method, subtotal, total_with_tip, tendered, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 order_id,
                 payment["split_no"],
+                payment["split_type"],
+                payment["split_percent"],
                 payment["method"],
                 payment["subtotal"],
                 payment["total_with_tip"],
@@ -616,12 +641,14 @@ def add_payments(conn: sqlite3.Connection, order_id: int, data: dict) -> None:
         cur = conn.execute(
             """
             INSERT INTO payments
-              (order_id, split_no, method, subtotal, total_with_tip, tendered, note)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+              (order_id, split_no, split_type, split_percent, method, subtotal, total_with_tip, tendered, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 order_id,
                 payment["split_no"],
+                payment["split_type"],
+                payment["split_percent"],
                 payment["method"],
                 payment["subtotal"],
                 payment["total_with_tip"],

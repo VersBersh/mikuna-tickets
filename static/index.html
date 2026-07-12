@@ -140,8 +140,14 @@
         <div class="split-head">
           <strong></strong>
           <div>
-            <label class="field percent-field"><span>% split</span><input class="split-percent" type="number" min="0" max="100" step="1" placeholder="50"></label>
-            <button class="apply-percent" type="button">Apply %</button>
+            <label class="field mode-field">
+              <span>Split by</span>
+              <select class="split-mode">
+                <option value="items">Items</option>
+                <option value="percent">Percent</option>
+              </select>
+            </label>
+            <label class="field percent-field hidden"><span>% of bill</span><input class="split-percent" type="number" min="0" max="100" step="1" placeholder="50"></label>
             <button class="fill-split" type="button">All remaining</button>
             <button class="remove-split" type="button">Remove</button>
           </div>

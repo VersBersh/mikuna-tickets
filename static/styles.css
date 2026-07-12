@@ -425,11 +425,17 @@ select:focus {
   gap: 8px;
 }
 
+.mode-field {
+  width: 104px;
+  gap: 3px;
+}
+
 .percent-field {
   width: 82px;
   gap: 3px;
 }
 
+.mode-field select,
 .percent-field input {
   min-height: 36px;
   padding-inline: 8px;

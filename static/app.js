@@ -195,7 +195,7 @@ function renderMenuPicker() {
   $("#paymentTitle").textContent = state.currentTicket ? "Edit or pay" : "Payment";
   $("#saveAction").textContent = state.currentTicket ? "Save ticket" : "Save ticket";
   $("#clearOrder").classList.toggle("hidden", Boolean(state.currentTicket));
-  $("#paymentSurface").classList.remove("hidden");
+  $("#paymentSurface").classList.toggle("hidden", !state.currentTicket);
   $$(".new-only").forEach((node) => node.classList.remove("hidden"));
   if (state.currentTicket) {
     $("#ticketBanner").classList.remove("hidden");
@@ -429,6 +429,15 @@ function hasTicketDraft() {
   return $("#tableNo").value.trim() && activeItems().length > 0;
 }
 
+function hasClearableNewOrderDraft() {
+  return !state.currentTicket && (
+    $("#tableNo").value.trim()
+    || $("#orderNote").value.trim()
+    || activeItems().length > 0
+    || paymentPayloads().length > 0
+  );
+}
+
 async function saveCurrentWork(
   { clearAfter, autosave = false, includePayments = true } = { clearAfter: true, autosave: false, includePayments: true }
 ) {
@@ -487,6 +496,13 @@ async function saveCurrentWork(
 
 async function saveAction() {
   await saveCurrentWork({ clearAfter: true, autosave: false });
+}
+
+function clearOrderAction() {
+  if (hasClearableNewOrderDraft() && !confirm("Clear this new order?")) {
+    return;
+  }
+  clearOrder();
 }
 
 async function flushAutosave() {
@@ -731,7 +747,7 @@ async function start() {
 $$(".tab").forEach((tab) => tab.addEventListener("click", () => switchView(tab.dataset.view)));
 document.addEventListener("focusin", selectInputValue);
 $("#saveAction").addEventListener("click", saveAction);
-$("#clearOrder").addEventListener("click", clearOrder);
+$("#clearOrder").addEventListener("click", clearOrderAction);
 $("#tableNo").addEventListener("input", () => markDirty({ schedule: Boolean(state.currentTicket) }));
 $("#orderNote").addEventListener("input", () => markDirty({ schedule: Boolean(state.currentTicket) }));
 $("#addSplit").addEventListener("click", () => addSplit(true));

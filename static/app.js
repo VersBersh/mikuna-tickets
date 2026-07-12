@@ -26,6 +26,14 @@ function setStatus(text) {
   $("#status").textContent = text;
 }
 
+function selectInputValue(event) {
+  const input = event.target;
+  if (!(input instanceof HTMLInputElement) || input.disabled || input.type !== "number") {
+    return;
+  }
+  window.setTimeout(() => input.select(), 0);
+}
+
 function switchView(view) {
   $$(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
   $$(".view").forEach((panel) => panel.classList.toggle("active", panel.id === `view-${view}`));
@@ -500,6 +508,7 @@ async function start() {
 }
 
 $$(".tab").forEach((tab) => tab.addEventListener("click", () => switchView(tab.dataset.view)));
+document.addEventListener("focusin", selectInputValue);
 $("#saveAction").addEventListener("click", saveAction);
 $("#clearOrder").addEventListener("click", clearOrder);
 $("#addSplit").addEventListener("click", addSplit);

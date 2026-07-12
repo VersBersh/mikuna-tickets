@@ -433,18 +433,20 @@ function renderAllocations(split) {
   const items = payableItemsForSplit(split);
   allocations.innerHTML = items.length
     ? items.map((item) => {
-      const value = Math.min(money(previous[item.code]), item.quantity);
+      const value = money(previous[item.code]);
       return `
         <label class="allocation">
           <span>${item.code}</span>
           <input data-code="${item.code}" data-price="${item.price}" type="number" min="0" max="${item.quantity}" step="0.01" value="${fmtQty(value)}">
-          <small>of ${fmtQty(item.quantity)}</small>
+          <small class="allocation-status"></small>
         </label>
       `;
     }).join("")
     : `<div class="empty">Add items before taking payment.</div>`;
   $$("input", allocations).forEach((input) => {
+    updateAllocationFeedback(input);
     input.addEventListener("input", () => {
+      updateAllocationFeedback(input);
       renderFollowingAllocations(split);
       recalc();
       markDirty();
@@ -456,6 +458,18 @@ function renderAllocations(split) {
       markDirty();
     });
   });
+}
+
+function updateAllocationFeedback(input) {
+  const row = input.closest(".allocation");
+  const entered = money(input.value);
+  const available = money(input.max);
+  const overBy = entered - available;
+  const status = $(".allocation-status", row);
+  row.classList.toggle("overcount", overBy > 0.009);
+  status.textContent = overBy > 0.009
+    ? `${fmtQty(entered)} / ${fmtQty(available)} - over by ${fmtQty(overBy)}`
+    : `${fmtQty(entered)} / ${fmtQty(available)} available`;
 }
 
 function renderFollowingAllocations(split) {

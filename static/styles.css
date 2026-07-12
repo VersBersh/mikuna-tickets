@@ -572,12 +572,22 @@ input[readonly] {
   padding: 8px;
 }
 
+.allocation.overcount {
+  border-color: var(--danger);
+  background: #fff4f4;
+}
+
 .allocation span {
   font-weight: 650;
 }
 
 .allocation small {
   color: var(--muted);
+}
+
+.allocation.overcount small {
+  color: var(--danger);
+  font-weight: 650;
 }
 
 .split-grid,

@@ -14,6 +14,12 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const money = (value) => Number(value || 0);
 const fmt = (value) => `$${money(value).toFixed(2)}`;
+const fmtQty = (value) => {
+  const rounded = Math.round(money(value) * 100) / 100;
+  return Number.isInteger(rounded)
+    ? String(rounded)
+    : rounded.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+};
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -276,15 +282,39 @@ function addSplit(markAsDirty = true) {
   $(".fill-split", node).addEventListener("click", () => {
     payableItems().forEach((item) => {
       const input = $(`.allocation input[data-code="${item.code}"]`, node);
-      if (input) input.value = item.quantity;
+      if (input) input.value = fmtQty(item.quantity);
     });
+    syncSplitAmountsToAllocations(node);
     recalc();
     markDirty();
+  });
+  $(".apply-percent", node).addEventListener("click", () => {
+    applySplitPercent(node);
+  });
+  $(".split-percent", node).addEventListener("change", () => {
+    applySplitPercent(node);
+  });
+  $(".split-percent", node).addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      applySplitPercent(node);
+    }
   });
   $("#splits").appendChild(node);
   renderAllocations(node);
   recalc();
   if (markAsDirty) markDirty();
+}
+
+function applySplitPercent(split) {
+  const ratio = Math.max(0, money($(".split-percent", split).value)) / 100;
+  payableItems().forEach((item) => {
+    const input = $(`.allocation input[data-code="${item.code}"]`, split);
+    if (input) input.value = fmtQty(Math.min(item.quantity, item.quantity * ratio));
+  });
+  syncSplitAmountsToAllocations(split);
+  recalc();
+  markDirty();
 }
 
 function renderSplits() {
@@ -303,8 +333,8 @@ function renderAllocations(split) {
     ? items.map((item) => `
       <label class="allocation">
         <span>${item.code}</span>
-        <input data-code="${item.code}" data-price="${item.price}" type="number" min="0" max="${item.quantity}" step="1" value="${previous[item.code] || 0}">
-        <small>of ${item.quantity}</small>
+        <input data-code="${item.code}" data-price="${item.price}" type="number" min="0" max="${item.quantity}" step="0.01" value="${previous[item.code] || 0}">
+        <small>of ${fmtQty(item.quantity)}</small>
       </label>
     `).join("")
     : `<div class="empty">Add items before taking payment.</div>`;
@@ -338,6 +368,17 @@ function splitData(row, index) {
     tendered: money($(".split-tendered", row).value),
     allocations,
   };
+}
+
+function splitAllocationSubtotal(row) {
+  return splitData(row, 0).allocations.reduce((sum, item) => sum + item.amount, 0);
+}
+
+function syncSplitAmountsToAllocations(row) {
+  const subtotal = splitAllocationSubtotal(row).toFixed(2);
+  $(".split-subtotal", row).value = subtotal;
+  $(".split-total", row).value = subtotal;
+  $(".split-tendered", row).value = subtotal;
 }
 
 function recalc() {

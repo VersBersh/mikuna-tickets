@@ -188,6 +188,7 @@ function renderMenuPicker() {
   $("#orderTitle").textContent = state.currentTicket ? `Ticket #${state.currentTicket.id}` : "New order";
   $("#paymentTitle").textContent = state.currentTicket ? "Edit or pay" : "Payment";
   $("#saveAction").textContent = state.currentTicket ? "Save ticket" : "Save ticket";
+  $("#clearOrder").classList.toggle("hidden", Boolean(state.currentTicket));
   $("#paymentSurface").classList.remove("hidden");
   $$(".new-only").forEach((node) => node.classList.remove("hidden"));
   if (state.currentTicket) {

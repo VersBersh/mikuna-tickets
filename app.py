@@ -663,6 +663,10 @@ def save_menu_item(conn: sqlite3.Connection, data: dict, code: str | None = None
         ON CONFLICT(code) DO UPDATE SET
           name = excluded.name,
           price = excluded.price,
+          sort_order = CASE
+            WHEN menu_items.active = 0 THEN excluded.sort_order
+            ELSE menu_items.sort_order
+          END,
           active = 1
         """,
         (item_code, name, price, max_sort + 1),
@@ -672,6 +676,44 @@ def save_menu_item(conn: sqlite3.Connection, data: dict, code: str | None = None
             "SELECT code, name, price, active FROM menu_items WHERE code = ?",
             (item_code,),
         ).fetchone()
+    )
+
+
+def reorder_menu_items(conn: sqlite3.Connection, codes: list[object]) -> list[dict]:
+    clean_codes = []
+    for code in codes:
+        item_code = str(code).strip().upper()
+        if item_code and item_code not in clean_codes:
+            clean_codes.append(item_code)
+    if not clean_codes:
+        raise ValueError("No menu items to reorder.")
+    active_codes = {
+        row["code"]
+        for row in conn.execute("SELECT code FROM menu_items WHERE active = 1").fetchall()
+    }
+    for item_code in clean_codes:
+        if item_code not in active_codes:
+            raise ValueError(f"Unknown active menu code: {item_code}")
+    for sort_order, item_code in enumerate(clean_codes, start=1):
+        conn.execute(
+            "UPDATE menu_items SET sort_order = ? WHERE code = ?",
+            (sort_order, item_code),
+        )
+    next_order = len(clean_codes) + 1
+    for item_code in sorted(active_codes - set(clean_codes)):
+        conn.execute(
+            "UPDATE menu_items SET sort_order = ? WHERE code = ?",
+            (next_order, item_code),
+        )
+        next_order += 1
+    return rows(
+        conn,
+        """
+        SELECT code, name, price, active
+        FROM menu_items
+        WHERE active = 1
+        ORDER BY sort_order, code
+        """,
     )
 
 
@@ -745,6 +787,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/menu/reorder":
+            try:
+                data = self.read_json()
+                with connect() as conn:
+                    menu = reorder_menu_items(conn, data.get("codes", []))
+                    conn.commit()
+                    self.json(menu)
+            except ValueError as exc:
+                self.error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
         if parsed.path == "/api/menu":
             try:
                 data = self.read_json()

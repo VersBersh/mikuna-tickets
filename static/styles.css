@@ -259,11 +259,17 @@ select:focus {
   margin-top: 4px;
 }
 
-.row-actions {
+.row-actions,
+.order-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.order-actions button:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .title-actions {
@@ -372,7 +378,7 @@ select:focus {
 }
 
 .editor-row {
-  grid-template-columns: 70px 1fr 110px auto auto;
+  grid-template-columns: 70px minmax(180px, 1fr) 110px auto auto auto;
 }
 
 .check {

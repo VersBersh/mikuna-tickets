@@ -222,6 +222,7 @@ function renderMenuPicker() {
   $("#saveAction").textContent = state.currentTicket ? "Save ticket" : "Save ticket";
   $("#clearOrder").classList.toggle("hidden", Boolean(state.currentTicket));
   $("#paymentSurface").classList.toggle("hidden", !state.currentTicket);
+  $("#addSplit").classList.toggle("hidden", Boolean(state.currentTicket && state.currentTicket.outstanding <= 0.009));
   $$(".new-only").forEach((node) => node.classList.remove("hidden"));
   if (state.currentTicket) {
     $("#ticketBanner").classList.remove("hidden");
@@ -376,6 +377,7 @@ function addSplit(markAsDirty = true, payment = null) {
     recalc();
     markDirty();
   });
+  $(".save-split", node).addEventListener("click", () => saveSplit(node));
   $(".split-mode", node).addEventListener("change", () => {
     setSplitMode(node, $(".split-mode", node).value);
     syncSplitAmountsToDue(node);
@@ -447,7 +449,7 @@ function renderSplits() {
   }
   renderFinalizedSplits();
   const splits = $$(".editable-split");
-  if (splits.length === 0) addSplit(false);
+  if (splits.length === 0 && state.currentTicket.outstanding > 0.009) addSplit(false);
   $$(".editable-split").forEach(renderAllocations);
 }
 
@@ -587,6 +589,28 @@ function splitData(row, index) {
   };
 }
 
+async function saveSplit(row) {
+  if (!state.currentTicket) return;
+  if (!validateTicketForSave()) return;
+  const payment = splitData(row, Number(row.dataset.splitNo || 1) - 1);
+  if (payment.subtotal <= 0 && payment.total_with_tip <= 0) {
+    setStatus("Add something to this split before saving.");
+    return;
+  }
+  try {
+    const ticket = await savePaymentPayloads([payment], state.currentTicket);
+    state.currentTicket = ticket;
+    state.editingPaymentId = null;
+    state.dirty = false;
+    setStatus(`Saved split ${payment.split_no}`);
+    upsertTicketTab(ticket);
+    loadTicketIntoForm(ticket);
+    await refreshAll();
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
 function splitAllocations(row) {
   return $$(".allocation input", row)
     .map((input) => ({
@@ -717,20 +741,7 @@ async function saveCurrentWork(
         }),
       });
       if (hasPayments) {
-        const updates = payments.filter((payment) => payment.payment_id);
-        const additions = payments.filter((payment) => !payment.payment_id);
-        for (const payment of updates) {
-          ticket = await api(`/api/payments/${payment.payment_id}`, {
-            method: "PUT",
-            body: JSON.stringify(payment),
-          });
-        }
-        if (additions.length) {
-          ticket = await api(`/api/orders/${state.currentTicket.id}/payments`, {
-            method: "POST",
-            body: JSON.stringify({ payments: additions }),
-          });
-        }
+        ticket = await savePaymentPayloads(payments, ticket);
       }
       state.currentTicket = ticket;
       state.editingPaymentId = null;
@@ -764,6 +775,25 @@ async function saveCurrentWork(
   }
 }
 
+async function savePaymentPayloads(payments, currentTicket) {
+  let ticket = currentTicket;
+  const updates = payments.filter((payment) => payment.payment_id);
+  const additions = payments.filter((payment) => !payment.payment_id);
+  for (const payment of updates) {
+    ticket = await api(`/api/payments/${payment.payment_id}`, {
+      method: "PUT",
+      body: JSON.stringify(payment),
+    });
+  }
+  if (additions.length) {
+    ticket = await api(`/api/orders/${currentTicket.id}/payments`, {
+      method: "POST",
+      body: JSON.stringify({ payments: additions }),
+    });
+  }
+  return ticket;
+}
+
 async function saveAction() {
   if (!validateTicketForSave()) return;
   await saveCurrentWork({ clearAfter: true, autosave: false });
@@ -789,6 +819,7 @@ function clearOrder() {
   state.dirty = false;
   state.quantities = {};
   state.menu.forEach((item) => { state.quantities[item.code] = 0; });
+  clearFieldInvalid($("#tableNo"));
   $("#tableNo").value = "";
   $("#orderNote").value = "";
   $("#splits").innerHTML = "";
@@ -1046,7 +1077,10 @@ $("#tableNo").addEventListener("input", () => {
   markDirty({ schedule: Boolean(state.currentTicket) });
 });
 $("#orderNote").addEventListener("input", () => markDirty({ schedule: Boolean(state.currentTicket) }));
-$("#addSplit").addEventListener("click", () => addSplit(true));
+$("#addSplit").addEventListener("click", () => {
+  if (state.currentTicket?.outstanding <= 0.009) return;
+  addSplit(true);
+});
 $("#ticketSearch").addEventListener("input", renderTickets);
 $("#openOnly").addEventListener("change", renderTickets);
 $("#clearTicketFilters").addEventListener("click", () => {

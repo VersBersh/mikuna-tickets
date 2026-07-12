@@ -391,7 +391,7 @@ function splitData(row, index) {
     split_type: mode,
     split_percent: mode === "percent" ? Math.max(0, money($(".split-percent", row).value)) : 0,
     method: $(".method", row).value,
-    subtotal: money($(".split-subtotal", row).value),
+    subtotal: splitSubtotal(row),
     total_with_tip: money($(".split-total", row).value),
     tendered: money($(".split-tendered", row).value),
     allocations,
@@ -422,7 +422,7 @@ function recalc() {
     const subtotalInput = $(".split-subtotal", row);
     const totalInput = $(".split-total", row);
     const tenderedInput = $(".split-tendered", row);
-    if (!subtotalInput.matches(":focus")) subtotalInput.value = subtotal.toFixed(2);
+    subtotalInput.value = subtotal.toFixed(2);
     if (money(totalInput.value) < subtotal && !totalInput.matches(":focus")) totalInput.value = subtotal.toFixed(2);
     if (money(tenderedInput.value) < money(totalInput.value) && !tenderedInput.matches(":focus")) tenderedInput.value = money(totalInput.value).toFixed(2);
     const splitTotal = money(totalInput.value);

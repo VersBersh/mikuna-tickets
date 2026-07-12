@@ -246,6 +246,11 @@ select:focus {
   outline: none;
 }
 
+input[readonly] {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
 .hidden {
   display: none !important;
 }

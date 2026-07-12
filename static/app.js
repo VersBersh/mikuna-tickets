@@ -335,26 +335,31 @@ function addSplit(markAsDirty = true, payment = null) {
       renderFinalizedSplits();
       addSplit(false);
     }
+    renderSplits();
     recalc();
     markDirty();
   });
   $(".fill-split", node).addEventListener("click", () => {
-    payableItems().forEach((item) => {
+    renderAllocations(node);
+    payableItemsForSplit(node).forEach((item) => {
       const input = $(`.allocation input[data-code="${item.code}"]`, node);
       if (input) input.value = fmtQty(item.quantity);
     });
     syncSplitAmountsToDue(node);
+    renderFollowingAllocations(node);
     recalc();
     markDirty();
   });
   $(".split-mode", node).addEventListener("change", () => {
     setSplitMode(node, $(".split-mode", node).value);
     syncSplitAmountsToDue(node);
+    renderFollowingAllocations(node);
     recalc();
     markDirty();
   });
   $(".split-percent", node).addEventListener("input", () => {
     syncSplitAmountsToDue(node);
+    renderFollowingAllocations(node);
     recalc();
     markDirty();
   });
@@ -362,6 +367,7 @@ function addSplit(markAsDirty = true, payment = null) {
     if (event.key === "Enter") {
       event.preventDefault();
       syncSplitAmountsToDue(node);
+      renderFollowingAllocations(node);
       recalc();
       markDirty();
     }
@@ -427,19 +433,19 @@ function renderAllocations(split) {
   const items = payableItemsForSplit(split);
   allocations.innerHTML = items.length
     ? items.map((item) => {
-      const savedQuantity = savedSplitQuantity(split, item.code);
-      const maxQuantity = item.quantity + savedQuantity;
+      const value = Math.min(money(previous[item.code]), item.quantity);
       return `
         <label class="allocation">
           <span>${item.code}</span>
-          <input data-code="${item.code}" data-price="${item.price}" type="number" min="0" max="${maxQuantity}" step="0.01" value="${previous[item.code] || 0}">
-          <small>of ${fmtQty(maxQuantity)}</small>
+          <input data-code="${item.code}" data-price="${item.price}" type="number" min="0" max="${item.quantity}" step="0.01" value="${fmtQty(value)}">
+          <small>of ${fmtQty(item.quantity)}</small>
         </label>
       `;
     }).join("")
     : `<div class="empty">Add items before taking payment.</div>`;
   $$("input", allocations).forEach((input) => {
     input.addEventListener("input", () => {
+      renderFollowingAllocations(split);
       recalc();
       markDirty();
     });
@@ -452,38 +458,73 @@ function renderAllocations(split) {
   });
 }
 
-function payableItemsForSplit(split) {
-  const items = payableItems();
-  if (!split.dataset.paymentAllocations) return items;
-  let allocations = [];
-  try {
-    allocations = JSON.parse(split.dataset.paymentAllocations);
-  } catch {
-    allocations = [];
+function renderFollowingAllocations(split) {
+  let afterCurrent = false;
+  for (const row of $$(".editable-split")) {
+    if (afterCurrent) renderAllocations(row);
+    if (row === split) afterCurrent = true;
   }
-  allocations.forEach((allocation) => {
-    if (items.some((item) => item.code === allocation.menu_code)) return;
-    const ordered = ticketItemByCode(allocation.menu_code);
-    const menuItem = state.menu.find((item) => item.code === allocation.menu_code);
-    items.push({
-      code: allocation.menu_code,
-      name: ordered?.name || menuItem?.name || allocation.menu_code,
-      price: ordered?.unit_price || menuItem?.price || 0,
-      quantity: 0,
+}
+
+function payableItemsForSplit(split) {
+  const usedBefore = editableAllocationsBefore(split);
+  const items = draftBasePayableItems().map((item) => ({
+    ...item,
+    quantity: Math.max(0, item.quantity - money(usedBefore[item.code])),
+  }));
+  return items.filter((item) => item.quantity > 0);
+}
+
+function editableAllocationsBefore(split) {
+  const used = {};
+  const baseItems = draftBasePayableItems();
+  for (const row of $$(".editable-split")) {
+    if (row === split) break;
+    if (splitMode(row) === "items") {
+      splitAllocations(row).forEach((allocation) => {
+        used[allocation.menu_code] = money(used[allocation.menu_code]) + money(allocation.quantity);
+      });
+    } else {
+      const ratio = Math.max(0, money($(".split-percent", row).value)) / 100;
+      baseItems.forEach((item) => {
+        used[item.code] = money(used[item.code]) + item.quantity * ratio;
+      });
+    }
+  }
+  return used;
+}
+
+function draftBasePayableItems() {
+  const items = payableItems().map((item) => ({ ...item }));
+  const payment = state.currentTicket?.payments?.find((row) => Number(row.id) === Number(state.editingPaymentId));
+  if (!payment) return items;
+  if (payment.split_type === "items") {
+    (payment.allocations || []).forEach((allocation) => {
+      addQuantityToItems(items, allocation.menu_code, money(allocation.quantity));
     });
-  });
+  } else {
+    const ratio = Math.max(0, money(payment.split_percent)) / 100;
+    (state.currentTicket?.items || []).forEach((item) => {
+      addQuantityToItems(items, item.menu_code, money(item.quantity) * ratio);
+    });
+  }
   return items;
 }
 
-function savedSplitQuantity(split, code) {
-  if (!split.dataset.paymentAllocations) return 0;
-  try {
-    return JSON.parse(split.dataset.paymentAllocations)
-      .filter((allocation) => allocation.menu_code === code)
-      .reduce((sum, allocation) => sum + money(allocation.quantity), 0);
-  } catch {
-    return 0;
+function addQuantityToItems(items, code, quantity) {
+  const existing = items.find((item) => item.code === code);
+  if (existing) {
+    existing.quantity += quantity;
+    return;
   }
+  const ordered = ticketItemByCode(code);
+  const menuItem = state.menu.find((item) => item.code === code);
+  items.push({
+    code,
+    name: ordered?.name || menuItem?.name || code,
+    price: ordered?.unit_price || menuItem?.price || 0,
+    quantity,
+  });
 }
 
 function splitData(row, index) {

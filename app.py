@@ -645,6 +645,32 @@ def add_payments(conn: sqlite3.Connection, order_id: int, data: dict) -> None:
                 )
 
 
+def active_menu(conn: sqlite3.Connection) -> list[dict]:
+    return rows(
+        conn,
+        """
+        SELECT code, name, price, active
+        FROM menu_items
+        WHERE active = 1
+        ORDER BY sort_order, code
+        """,
+    )
+
+
+def normalize_active_menu_order(conn: sqlite3.Connection) -> None:
+    active_codes = [
+        row["code"]
+        for row in conn.execute(
+            "SELECT code FROM menu_items WHERE active = 1 ORDER BY sort_order, code"
+        ).fetchall()
+    ]
+    for sort_order, item_code in enumerate(active_codes, start=1):
+        conn.execute(
+            "UPDATE menu_items SET sort_order = ? WHERE code = ?",
+            (sort_order, item_code),
+        )
+
+
 def save_menu_item(conn: sqlite3.Connection, data: dict, code: str | None = None) -> dict:
     item_code = str(code or data.get("code", "")).strip().upper()
     name = str(data.get("name", "")).strip()
@@ -655,7 +681,9 @@ def save_menu_item(conn: sqlite3.Connection, data: dict, code: str | None = None
         raise ValueError("Menu name is required.")
     if price < 0:
         raise ValueError("Price cannot be negative.")
-    max_sort = conn.execute("SELECT COALESCE(MAX(sort_order), 0) FROM menu_items").fetchone()[0]
+    max_sort = conn.execute(
+        "SELECT COALESCE(MAX(sort_order), 0) FROM menu_items WHERE active = 1"
+    ).fetchone()[0]
     conn.execute(
         """
         INSERT INTO menu_items (code, name, price, sort_order, active)
@@ -706,15 +734,8 @@ def reorder_menu_items(conn: sqlite3.Connection, codes: list[object]) -> list[di
             (next_order, item_code),
         )
         next_order += 1
-    return rows(
-        conn,
-        """
-        SELECT code, name, price, active
-        FROM menu_items
-        WHERE active = 1
-        ORDER BY sort_order, code
-        """,
-    )
+    normalize_active_menu_order(conn)
+    return active_menu(conn)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -724,12 +745,7 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/menu":
             with connect() as conn:
-                self.json(
-                    rows(
-                        conn,
-                        "SELECT code, name, price, active FROM menu_items WHERE active = 1 ORDER BY sort_order, code",
-                    )
-                )
+                self.json(active_menu(conn))
             return
         if parsed.path == "/api/orders":
             query = parse_qs(parsed.query)
@@ -902,6 +918,7 @@ class Handler(BaseHTTPRequestHandler):
             code = parsed.path.rsplit("/", 1)[1]
             with connect() as conn:
                 conn.execute("UPDATE menu_items SET active = 0 WHERE code = ?", (code,))
+                normalize_active_menu_order(conn)
                 conn.commit()
             self.json({"ok": True})
             return

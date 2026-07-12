@@ -78,17 +78,32 @@ function stopAutosaveTimer() {
 function renderTicketTabs() {
   const orderViewActive = $("#view-order")?.classList.contains("active");
   $("#ticketTabs").innerHTML = state.openTickets.map((ticket) => `
-    <button
-      class="tab ticket-tab ${orderViewActive && state.currentTicket?.id === ticket.id ? "active" : ""}"
-      data-ticket-tab="${ticket.id}"
-      type="button"
-    >
-      #${ticket.id} ${ticket.table_no}
-      <span>${fmt(ticket.outstanding)}</span>
-    </button>
+    <span class="ticket-tab-wrap ${orderViewActive && state.currentTicket?.id === ticket.id ? "active" : ""}">
+      <button
+        class="tab ticket-tab"
+        data-ticket-tab="${ticket.id}"
+        type="button"
+      >
+        #${ticket.id} ${ticket.table_no}
+        <span>${fmt(ticket.outstanding)}</span>
+      </button>
+      <button
+        class="ticket-tab-close"
+        data-close-ticket-tab="${ticket.id}"
+        type="button"
+        title="Close ticket tab"
+        aria-label="Close ticket tab"
+      >&times;</button>
+    </span>
   `).join("");
   $$("[data-ticket-tab]").forEach((button) => {
     button.addEventListener("click", () => openTicketTab(Number(button.dataset.ticketTab)));
+  });
+  $$("[data-close-ticket-tab]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      requestCloseTicketTab(button.dataset.closeTicketTab);
+    });
   });
 }
 
@@ -115,6 +130,14 @@ function closeTicketTab(ticketId) {
   } else {
     renderTicketTabs();
   }
+}
+
+async function requestCloseTicketTab(ticketId) {
+  if (state.currentTicket?.id === Number(ticketId)) {
+    const saved = await flushAutosave();
+    if (!saved) return;
+  }
+  closeTicketTab(ticketId);
 }
 
 function activeItems() {
@@ -518,27 +541,27 @@ function renderMenuEditor() {
       <input class="edit-name" value="${item.name}">
       <input class="edit-price" type="number" min="0" step="0.01" value="${item.price}">
       <div class="order-actions">
-        <button class="icon-button" data-move-menu-index="${index}" data-direction="-1" type="button" title="Move up" aria-label="Move item up" ${index === 0 ? "disabled" : ""}>&#8593;</button>
-        <button class="icon-button" data-move-menu-index="${index}" data-direction="1" type="button" title="Move down" aria-label="Move item down" ${index === state.menu.length - 1 ? "disabled" : ""}>&#8595;</button>
+        <button class="icon-button" data-move-menu-code="${item.code}" data-direction="-1" type="button" title="Move up" aria-label="Move item up" ${index === 0 ? "disabled" : ""}>&#9650;</button>
+        <button class="icon-button" data-move-menu-code="${item.code}" data-direction="1" type="button" title="Move down" aria-label="Move item down" ${index === state.menu.length - 1 ? "disabled" : ""}>&#9660;</button>
       </div>
       <button data-save-menu="${item.code}" type="button">Save</button>
       <button class="danger" data-delete-menu="${item.code}" type="button">Delete</button>
     </div>
   `).join("");
-  $$("[data-move-menu-index]").forEach((button) => {
+  $$("[data-move-menu-code]").forEach((button) => {
     button.addEventListener("click", async () => {
       try {
-        const index = Number(button.dataset.moveMenuIndex);
+        const index = state.menu.findIndex((item) => item.code === button.dataset.moveMenuCode);
         const nextIndex = index + Number(button.dataset.direction);
         if (index < 0 || nextIndex < 0 || nextIndex >= state.menu.length) return;
         const nextMenu = [...state.menu];
         [nextMenu[index], nextMenu[nextIndex]] = [nextMenu[nextIndex], nextMenu[index]];
-        await api("/api/menu/reorder", {
+        const menu = await api("/api/menu/reorder", {
           method: "POST",
           body: JSON.stringify({ codes: nextMenu.map((item) => item.code) }),
         });
+        applyMenu(menu);
         setStatus("Menu order saved");
-        await loadMenu();
       } catch (error) {
         setStatus(error.message);
       }
@@ -579,7 +602,11 @@ async function addMenuItem() {
 }
 
 async function loadMenu() {
-  state.menu = await api("/api/menu");
+  applyMenu(await api("/api/menu"));
+}
+
+function applyMenu(menu) {
+  state.menu = menu;
   state.menu.forEach((item) => {
     if (state.quantities[item.code] === undefined) state.quantities[item.code] = 0;
     if (state.ticketFilters[item.code] === undefined) state.ticketFilters[item.code] = 0;

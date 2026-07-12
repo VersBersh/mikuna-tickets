@@ -421,6 +421,33 @@ def summary(conn: sqlite3.Connection, event_id: int | None = None) -> dict:
     order_count = conn.execute(
         "SELECT COUNT(*) FROM orders WHERE event_id = ?", (event_id,)
     ).fetchone()[0]
+    ticket_totals = rows(
+        conn,
+        """
+        WITH ordered AS (
+          SELECT o.id,
+                 ROUND(COALESCE(SUM(oi.quantity * oi.unit_price), 0), 2) AS subtotal
+          FROM orders o
+          LEFT JOIN order_items oi ON oi.order_id = o.id
+          WHERE o.event_id = ?
+          GROUP BY o.id
+        ),
+        paid AS (
+          SELECT p.order_id, ROUND(COALESCE(SUM(p.subtotal), 0), 2) AS subtotal
+          FROM payments p
+          JOIN orders o ON o.id = p.order_id
+          WHERE o.event_id = ?
+          GROUP BY p.order_id
+        )
+        SELECT
+          ROUND(COALESCE(SUM(ordered.subtotal), 0), 2) AS ticket_total,
+          ROUND(COALESCE(SUM(COALESCE(paid.subtotal, 0)), 0), 2) AS paid_total,
+          ROUND(COALESCE(SUM(MAX(ordered.subtotal - COALESCE(paid.subtotal, 0), 0)), 0), 2) AS open_total
+        FROM ordered
+        LEFT JOIN paid ON paid.order_id = ordered.id
+        """,
+        (event_id, event_id),
+    )[0]
     sold = rows(
         conn,
         """
@@ -440,6 +467,9 @@ def summary(conn: sqlite3.Connection, event_id: int | None = None) -> dict:
     expected_cash = opening_cash + payment_rows["cash_total"] - payment_rows["cash_change"]
     return {
         "order_count": order_count,
+        "ticket_total": round(ticket_totals["ticket_total"], 2),
+        "paid_total": round(ticket_totals["paid_total"], 2),
+        "open_total": round(ticket_totals["open_total"], 2),
         "subtotal": round(payment_rows["subtotal"], 2),
         "tips": round(payment_rows["tips"], 2),
         "total": round(payment_rows["total"], 2),

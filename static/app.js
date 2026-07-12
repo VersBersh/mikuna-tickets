@@ -776,12 +776,14 @@ async function renderSummary() {
   const summary = await api("/api/summary");
   $("#metrics").innerHTML = [
     metric("Orders", summary.order_count),
-    metric("Total", fmt(summary.total)),
+    metric("All tickets", fmt(summary.ticket_total)),
+    metric("Paid", fmt(summary.paid_total)),
+    metric("Open", fmt(summary.open_total), summary.open_total ? "warn" : ""),
+    metric("Paid incl. tips", fmt(summary.total)),
+    metric("Tips", fmt(summary.tips)),
     metric("Cash", fmt(summary.cash_total)),
     metric("PayPal", fmt(summary.paypal_total)),
-    metric("Tips", fmt(summary.tips)),
     metric("Expected cash", fmt(summary.expected_cash)),
-    metric("Cash change", fmt(summary.cash_change)),
     metric("Discrepancy", summary.cash_discrepancy === null ? "-" : fmt(summary.cash_discrepancy), summary.cash_discrepancy ? "warn" : ""),
   ].join("");
   $("#openingCash").value = summary.opening_cash.toFixed(2);

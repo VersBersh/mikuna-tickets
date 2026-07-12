@@ -1,0 +1,10 @@
+*.xlsx
+*.xls
+*.xlsm
+*.db
+*.db-*
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+Thumbs.db

@@ -597,6 +597,7 @@ input[readonly] {
 
 .split-grid,
 .menu-form,
+.event-form,
 .cash-settings {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -610,6 +611,16 @@ input[readonly] {
 
 .menu-form {
   grid-template-columns: 90px 1fr 120px auto;
+}
+
+.event-form {
+  grid-template-columns: minmax(180px, 1fr) 150px auto auto;
+}
+
+.help-text {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 10px;
 }
 
 .editor-row {
@@ -664,6 +675,7 @@ input[readonly] {
   .grid.two,
   .split-grid,
   .menu-form,
+  .event-form,
   .cash-settings,
   .metrics,
   .metrics.compact,
@@ -689,6 +701,7 @@ input[readonly] {
   .grid.two,
   .split-grid,
   .menu-form,
+  .event-form,
   .cash-settings,
   .metrics,
   .metrics.compact,

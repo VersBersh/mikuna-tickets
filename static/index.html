@@ -129,10 +129,22 @@
       </section>
 
       <section class="view" id="view-events">
-        <section class="surface">
-          <div class="surface-title"><h2>Past events</h2></div>
-          <div id="eventList" class="event-list"></div>
-        </section>
+        <div class="grid two">
+          <section class="surface">
+            <div class="surface-title"><h2>Active event</h2></div>
+            <div class="event-form">
+              <label class="field"><span>Name</span><input id="activeEventName" autocomplete="off"></label>
+              <label class="field"><span>Date</span><input id="activeEventDate" type="date"></label>
+              <button id="saveActiveEvent" type="button">Save event</button>
+              <button class="accent" id="closeEvent" type="button">Close event</button>
+            </div>
+            <p class="help-text">Closing archives the current event and starts a fresh active event. Tickets stay in history.</p>
+          </section>
+          <section class="surface">
+            <div class="surface-title"><h2>Past events</h2></div>
+            <div id="eventList" class="event-list"></div>
+          </section>
+        </div>
       </section>
     </main>
 

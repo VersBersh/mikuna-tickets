@@ -286,6 +286,13 @@ def order_payload(conn: sqlite3.Connection, order_id: int) -> dict:
     return payload
 
 
+def active_order_payload(conn: sqlite3.Connection, order_id: int) -> dict:
+    payload = order_payload(conn, order_id)
+    if int(payload["event_id"]) != active_event_id(conn):
+        raise KeyError("Order not found")
+    return payload
+
+
 def remaining_items(conn: sqlite3.Connection, order_id: int) -> list[dict]:
     return rows(
         conn,
@@ -521,6 +528,31 @@ def event_rows(conn: sqlite3.Connection) -> list[dict]:
     )
 
 
+def active_event(conn: sqlite3.Connection) -> dict:
+    event_id = active_event_id(conn)
+    event = conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+    if not event:
+        raise KeyError("Active event not found")
+    payload = dict(event)
+    payload.update(summary(conn, event_id))
+    return payload
+
+
+def update_active_event(conn: sqlite3.Connection, data: dict) -> dict:
+    event_id = active_event_id(conn)
+    name = str(data.get("name", "")).strip()
+    event_date = str(data.get("event_date", "")).strip()
+    if not name:
+        raise ValueError("Event name is required.")
+    if not event_date:
+        raise ValueError("Event date is required.")
+    conn.execute(
+        "UPDATE events SET name = ?, event_date = ? WHERE id = ? AND status = 'active'",
+        (name, event_date, event_id),
+    )
+    return active_event(conn)
+
+
 def validate_order(data: dict) -> tuple[list[dict], list[dict]]:
     items = []
     for item in data.get("items", []):
@@ -676,8 +708,11 @@ def update_order(conn: sqlite3.Connection, order_id: int, data: dict) -> None:
 
 
 def add_payments(conn: sqlite3.Connection, order_id: int, data: dict) -> None:
-    if not conn.execute("SELECT id FROM orders WHERE id = ?", (order_id,)).fetchone():
+    row = conn.execute("SELECT event_id FROM orders WHERE id = ?", (order_id,)).fetchone()
+    if not row:
         raise KeyError("Order not found")
+    if int(row["event_id"]) != active_event_id(conn):
+        raise ValueError("Only the active event can be edited.")
     _, payments = validate_order(
         {"items": [{"menu_code": "placeholder", "quantity": 1}], "payments": data.get("payments", [])}
     )
@@ -938,11 +973,15 @@ class Handler(BaseHTTPRequestHandler):
             with connect() as conn:
                 self.json(event_rows(conn))
             return
+        if parsed.path == "/api/events/active":
+            with connect() as conn:
+                self.json(active_event(conn))
+            return
         if parsed.path.startswith("/api/orders/"):
             try:
                 order_id = int(parsed.path.rsplit("/", 1)[1])
                 with connect() as conn:
-                    self.json(order_payload(conn, order_id))
+                    self.json(active_order_payload(conn, order_id))
             except (ValueError, KeyError):
                 self.error(HTTPStatus.NOT_FOUND, "Order not found")
             return
@@ -1006,6 +1045,16 @@ class Handler(BaseHTTPRequestHandler):
                         )
                 conn.commit()
                 self.json(summary(conn))
+            return
+        if parsed.path == "/api/events/active":
+            try:
+                data = self.read_json()
+                with connect() as conn:
+                    event = update_active_event(conn, data)
+                    conn.commit()
+                    self.json(event)
+            except ValueError as exc:
+                self.error(HTTPStatus.BAD_REQUEST, str(exc))
             return
         if parsed.path == "/api/events/start":
             data = self.read_json()

@@ -1035,7 +1035,10 @@ async function saveSettings() {
 }
 
 async function renderEvents() {
-  const events = await api("/api/events");
+  const active = await api("/api/events/active");
+  $("#activeEventName").value = active.name;
+  $("#activeEventDate").value = active.event_date;
+  const events = (await api("/api/events")).filter((event) => event.status === "archived");
   $("#eventList").innerHTML = events.length ? events.map((event) => {
     let menu = [];
     try {
@@ -1055,7 +1058,52 @@ async function renderEvents() {
         </div>
       </div>
     `;
-  }).join("") : `<div class="empty">No events yet</div>`;
+  }).join("") : `<div class="empty">No past events yet</div>`;
+}
+
+async function saveActiveEvent() {
+  try {
+    const event = await api("/api/events/active", {
+      method: "POST",
+      body: JSON.stringify({
+        name: $("#activeEventName").value,
+        event_date: $("#activeEventDate").value,
+      }),
+    });
+    setStatus(`Saved event ${event.name}`);
+    await refreshAll();
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
+async function closeEvent() {
+  const name = $("#activeEventName").value.trim();
+  const eventDate = $("#activeEventDate").value;
+  if (!name || !eventDate) {
+    setStatus("Name and date are required before closing the event.");
+    return;
+  }
+  if (!confirm(`Close "${name}" and start a new empty event?`)) return;
+  try {
+    await api("/api/events/active", {
+      method: "POST",
+      body: JSON.stringify({ name, event_date: eventDate }),
+    });
+    const nextDate = new Date().toISOString().slice(0, 10);
+    const next = await api("/api/events/start", {
+      method: "POST",
+      body: JSON.stringify({ name: `Mikuna ${nextDate}`, event_date: nextDate }),
+    });
+    state.currentTicket = null;
+    state.openTickets = [];
+    clearOrder();
+    await loadMenu();
+    await refreshAll();
+    setStatus(`Closed ${name}. Started ${next.name}`);
+  } catch (error) {
+    setStatus(error.message);
+  }
 }
 
 async function refreshAll() {
@@ -1093,5 +1141,7 @@ $("#clearTicketFilters").addEventListener("click", () => {
 $("#addMenuItem").addEventListener("click", addMenuItem);
 $("#refresh").addEventListener("click", refreshAll);
 $("#saveSettings").addEventListener("click", saveSettings);
+$("#saveActiveEvent").addEventListener("click", saveActiveEvent);
+$("#closeEvent").addEventListener("click", closeEvent);
 
 start().catch((error) => setStatus(error.message));

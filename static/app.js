@@ -1056,9 +1056,17 @@ async function renderEvents() {
           <span>${event.status} · ${event.order_count} tickets · ${fmt(event.total)} total · ${fmt(event.tips)} tips</span>
           <small>${menuText}</small>
         </div>
+        <div class="row-actions">
+          <button data-export-event="${event.id}" type="button">Export</button>
+        </div>
       </div>
     `;
   }).join("") : `<div class="empty">No past events yet</div>`;
+  $$("[data-export-event]").forEach((button) => {
+    button.addEventListener("click", () => {
+      window.open(`/api/events/${button.dataset.exportEvent}/export`, "_blank");
+    });
+  });
 }
 
 async function saveActiveEvent() {

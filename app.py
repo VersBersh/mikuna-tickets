@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html as html_lib
 import json
 import mimetypes
 import sqlite3
@@ -553,6 +554,157 @@ def update_active_event(conn: sqlite3.Connection, data: dict) -> dict:
     return active_event(conn)
 
 
+def esc(value: object) -> str:
+    return html_lib.escape("" if value is None else str(value))
+
+
+def currency(value: object) -> str:
+    return f"${money(value):.2f}"
+
+
+def event_report_html(conn: sqlite3.Connection, event_id: int) -> str:
+    event = conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+    if not event:
+        raise KeyError("Event not found")
+    event_data = dict(event)
+    totals = summary(conn, event_id)
+    order_ids = [
+        int(row["id"])
+        for row in conn.execute(
+            "SELECT id FROM orders WHERE event_id = ? ORDER BY id",
+            (event_id,),
+        ).fetchall()
+    ]
+    tickets = [order_payload(conn, order_id) for order_id in order_ids]
+    metric_rows = [
+        ("Orders", totals["order_count"]),
+        ("All tickets", currency(totals["ticket_total"])),
+        ("Paid", currency(totals["paid_total"])),
+        ("Open", currency(totals["open_total"])),
+        ("Paid incl. tips", currency(totals["total"])),
+        ("Tips", currency(totals["tips"])),
+        ("Cash", currency(totals["cash_total"])),
+        ("PayPal", currency(totals["paypal_total"])),
+    ]
+    metric_html = "".join(
+        f"<div><span>{esc(label)}</span><strong>{esc(value)}</strong></div>"
+        for label, value in metric_rows
+    )
+    sold_html = "".join(
+        f"""
+        <tr>
+          <td>{esc(item["code"])}</td>
+          <td>{esc(item["name"])}</td>
+          <td>{esc(item["quantity"])}</td>
+          <td>{currency(item["revenue"])}</td>
+        </tr>
+        """
+        for item in totals["sold"]
+    ) or "<tr><td colspan='4'>No items sold.</td></tr>"
+    ticket_html = "".join(ticket_report_html(ticket) for ticket in tickets) or "<p>No tickets.</p>"
+    title = f"{event_data['name']} - {event_data['event_date']}"
+    return f"""<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>{esc(title)} Export</title>
+    <style>
+      body {{ font-family: Segoe UI, Arial, sans-serif; color: #242424; margin: 32px; line-height: 1.4; }}
+      h1, h2, h3 {{ margin: 0 0 12px; }}
+      section {{ margin: 26px 0; }}
+      .muted {{ color: #616161; }}
+      .metrics {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 16px 0; }}
+      .metrics div {{ border: 1px solid #ddd; padding: 10px; border-radius: 6px; }}
+      .metrics span {{ display: block; color: #616161; font-size: 12px; font-weight: 600; }}
+      .metrics strong {{ display: block; font-size: 18px; margin-top: 2px; }}
+      table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+      th, td {{ border-bottom: 1px solid #e5e5e5; padding: 7px 8px; text-align: left; vertical-align: top; }}
+      th {{ background: #f5f5f5; font-size: 12px; text-transform: uppercase; color: #616161; }}
+      .ticket {{ break-inside: avoid; border: 1px solid #ddd; border-radius: 6px; padding: 14px; margin: 14px 0; }}
+      .ticket-head {{ display: flex; justify-content: space-between; gap: 16px; }}
+      .paid {{ color: #107c10; font-weight: 700; }}
+      .open {{ color: #8a4b00; font-weight: 700; }}
+      @media print {{ body {{ margin: 18mm; }} .ticket {{ break-inside: avoid; }} }}
+    </style>
+  </head>
+  <body>
+    <h1>{esc(event_data["name"])}</h1>
+    <p class="muted">{esc(event_data["event_date"])} - {esc(event_data["status"])}</p>
+    <section>
+      <h2>Summary</h2>
+      <div class="metrics">{metric_html}</div>
+    </section>
+    <section>
+      <h2>Sold Items</h2>
+      <table>
+        <thead><tr><th>Code</th><th>Item</th><th>Qty</th><th>Revenue</th></tr></thead>
+        <tbody>{sold_html}</tbody>
+      </table>
+    </section>
+    <section>
+      <h2>Ticket Appendix</h2>
+      {ticket_html}
+    </section>
+  </body>
+</html>"""
+
+
+def ticket_report_html(ticket: dict) -> str:
+    status = "paid" if money(ticket["outstanding"]) <= 0.009 else "open"
+    items = "".join(
+        f"""
+        <tr>
+          <td>{esc(item["menu_code"])}</td>
+          <td>{esc(item["name"])}</td>
+          <td>{esc(item["quantity"])}</td>
+          <td>{currency(item["unit_price"])}</td>
+          <td>{currency(item["line_total"])}</td>
+        </tr>
+        """
+        for item in ticket["items"]
+    )
+    payments = "".join(payment_report_html(payment) for payment in ticket["payments"])
+    payments = payments or "<tr><td colspan='7'>No payments recorded.</td></tr>"
+    return f"""
+    <article class="ticket">
+      <div class="ticket-head">
+        <div>
+          <h3>Ticket #{esc(ticket["id"])} - {esc(ticket["table_no"])}</h3>
+          <p class="muted">{esc(ticket["created_at"])}{(" - " + esc(ticket["note"])) if ticket.get("note") else ""}</p>
+        </div>
+        <div class="{status}">{currency(ticket["outstanding"])} open</div>
+      </div>
+      <table>
+        <thead><tr><th>Code</th><th>Item</th><th>Qty</th><th>Unit</th><th>Total</th></tr></thead>
+        <tbody>{items}</tbody>
+      </table>
+      <table>
+        <thead><tr><th>Split</th><th>Type</th><th>Method</th><th>Subtotal</th><th>Tip</th><th>Tendered</th><th>Change</th></tr></thead>
+        <tbody>{payments}</tbody>
+      </table>
+    </article>
+    """
+
+
+def payment_report_html(payment: dict) -> str:
+    split_type = (
+        f"{payment['split_percent']}%"
+        if payment.get("split_type") == "percent"
+        else "Items"
+    )
+    return f"""
+    <tr>
+      <td>{esc(payment["split_no"])}</td>
+      <td>{esc(split_type)}</td>
+      <td>{esc(payment["method"])}</td>
+      <td>{currency(payment["subtotal"])}</td>
+      <td>{currency(payment["tip"])}</td>
+      <td>{currency(payment["tendered"])}</td>
+      <td>{currency(payment["change"])}</td>
+    </tr>
+    """
+
+
 def validate_order(data: dict) -> tuple[list[dict], list[dict]]:
     items = []
     for item in data.get("items", []):
@@ -977,6 +1129,17 @@ class Handler(BaseHTTPRequestHandler):
             with connect() as conn:
                 self.json(active_event(conn))
             return
+        if parsed.path.startswith("/api/events/") and parsed.path.endswith("/export"):
+            try:
+                event_id = int(parsed.path.split("/")[3])
+                with connect() as conn:
+                    self.html(
+                        event_report_html(conn, event_id),
+                        filename=f"mikuna-event-{event_id}.html",
+                    )
+            except (ValueError, KeyError):
+                self.error(HTTPStatus.NOT_FOUND, "Event not found")
+            return
         if parsed.path.startswith("/api/orders/"):
             try:
                 order_id = int(parsed.path.rsplit("/", 1)[1])
@@ -1183,6 +1346,15 @@ class Handler(BaseHTTPRequestHandler):
         content = json.dumps(data, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+    def html(self, html: str, filename: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+        content = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Disposition", f'inline; filename="{filename}"')
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)

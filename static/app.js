@@ -10,6 +10,10 @@ const state = {
   autosaveInFlight: false,
   menuSaveTimers: {},
   editingPaymentId: null,
+  ticketMode: "edit",
+  ticketModeId: null,
+  // Quantities on the ticket when it was opened, so this visit's changes can be shown separately.
+  openedQuantities: {},
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -74,9 +78,74 @@ async function switchView(view) {
     state.currentTicket = null;
     clearOrder({ keepTicketTabs: true });
   }
+  if (view === "tickets" && activeView !== "tickets") clearTicketFilters();
   $$(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
   $$(".view").forEach((panel) => panel.classList.toggle("active", panel.id === `view-${view}`));
   renderTicketTabs();
+}
+
+function setTableLocked(locked) {
+  const value = $("#tableNo").value.trim();
+  const lock = locked && Boolean(value);
+  $("#tableEdit").classList.toggle("hidden", lock);
+  $("#tableLocked").classList.toggle("hidden", !lock);
+  $("#tableLockedText").textContent = lock ? tableLabel(value) : "";
+}
+
+async function checkTableClash() {
+  const notice = $("#tableClash");
+  const value = $("#tableNo").value.trim();
+  if (state.currentTicket || !value) {
+    notice.classList.add("hidden");
+    return;
+  }
+  try {
+    const tickets = await api(`/api/tickets?q=${encodeURIComponent(value)}&open=1`);
+    // Ignore the answer if the table or the order changed while it was in flight.
+    if (state.currentTicket || $("#tableNo").value.trim() !== value) return;
+    const matches = tickets.filter((ticket) => ticket.table_no.trim().toLowerCase() === value.toLowerCase());
+    notice.classList.toggle("hidden", matches.length === 0);
+    if (!matches.length) return;
+    const latest = matches.reduce((a, b) => (b.id > a.id ? b : a));
+    notice.dataset.ticketId = latest.id;
+    $("#tableClashText").textContent = matches.length === 1
+      ? `${tableLabel(latest.table_no)} already has an open ticket (${fmt(latest.outstanding)} due).`
+      : `${tableLabel(latest.table_no)} already has ${matches.length} open tickets.`;
+    $("#openClash").textContent = matches.length === 1 ? "Open that ticket" : "Open the latest";
+  } catch {
+    notice.classList.add("hidden");
+  }
+}
+
+async function openClashingTicket() {
+  const id = Number($("#tableClash").dataset.ticketId);
+  if (!id) return;
+  // Carry anything already picked on this new order over to the existing ticket.
+  const draft = Object.entries(state.quantities).filter(([, quantity]) => quantity > 0);
+  clearOrder();
+  await openTicketTab(id);
+  if (!draft.length || state.currentTicket?.id !== id) return;
+  draft.forEach(([code, quantity]) => {
+    state.quantities[code] = (state.quantities[code] || 0) + quantity;
+  });
+  renderMenuPicker();
+  markDirty({ schedule: true });
+  setStatus(`Added ${draft.length} ${draft.length === 1 ? "item" : "items"} to ${tableLabel(state.currentTicket.table_no)}`);
+}
+
+function editTable() {
+  setTableLocked(false);
+  const input = $("#tableNo");
+  input.focus();
+  input.select();
+}
+
+function clearTicketFilters() {
+  state.ticketFilters = {};
+  state.menu.forEach((item) => { state.ticketFilters[item.code] = 0; });
+  $("#ticketSearch").value = "";
+  renderTicketFilters();
+  renderTickets();
 }
 
 function markDirty({ schedule = false } = {}) {
@@ -218,17 +287,16 @@ function renderMenuPicker() {
   const list = $("#menuList");
   list.innerHTML = "";
   $("#orderTitle").textContent = state.currentTicket ? `Ticket #${state.currentTicket.id}` : "New order";
-  $("#paymentTitle").textContent = state.currentTicket ? "Edit or pay" : "Payment";
-  $("#saveAction").textContent = state.currentTicket ? "Save ticket" : "Save ticket";
+  $("#saveAction").classList.toggle("hidden", Boolean(state.currentTicket));
   $("#clearOrder").classList.toggle("hidden", Boolean(state.currentTicket));
-  $("#paymentSurface").classList.toggle("hidden", !state.currentTicket);
+  applyTicketMode();
   $("#addSplit").classList.toggle("hidden", Boolean(state.currentTicket && state.currentTicket.outstanding <= 0.009));
   $$(".new-only").forEach((node) => node.classList.remove("hidden"));
   if (state.currentTicket) {
     $("#ticketBanner").classList.remove("hidden");
     $("#ticketBanner").classList.toggle("settled", state.currentTicket.outstanding <= 0.009);
     $("#ticketBanner").classList.toggle("open-ticket", state.currentTicket.outstanding > 0.009);
-    $("#ticketBanner").innerHTML = `<strong>${state.currentTicket.table_no}</strong> · ${fmt(state.currentTicket.outstanding)} remaining · ${state.currentTicket.outstanding <= 0.009 ? "Settled" : "Open"} · ${state.currentTicket.note || "No note"}`;
+    $("#ticketBanner").innerHTML = `${fmt(state.currentTicket.outstanding)} remaining · ${state.currentTicket.outstanding <= 0.009 ? "Settled" : "Open"} · ${state.currentTicket.note || "No note"}`;
   } else {
     $("#ticketBanner").classList.add("hidden");
     $("#ticketBanner").classList.remove("settled", "open-ticket");
@@ -236,9 +304,10 @@ function renderMenuPicker() {
   state.menu.filter((item) => item.active).forEach((item) => {
     const existing = ticketItemByCode(item.code);
     const row = document.createElement("div");
-    row.className = "menu-row";
+    row.className = `menu-row ${item.category === "food" ? "food" : ""}`;
+    row.dataset.search = `${item.code} ${item.name}`.toLowerCase();
     row.innerHTML = `
-      <div><strong>${item.code} · ${item.name}</strong><span>${fmt(existing?.unit_price || item.price)}</span></div>
+      <div><strong>${item.name}</strong><span>${item.code}</span><span>${fmt(existing?.unit_price || item.price)}</span></div>
       <div class="qty-control">
         <button type="button" data-step="-1">-</button>
         <input type="number" min="0" step="1" value="${state.quantities[item.code] || 0}">
@@ -264,8 +333,47 @@ function renderMenuPicker() {
     });
     list.appendChild(row);
   });
+  filterMenuPicker();
   renderSplits();
   recalc();
+}
+
+function filterMenuPicker() {
+  const terms = $("#menuSearch").value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const rows = $$(".menu-row", $("#menuList"));
+  let visible = 0;
+  rows.forEach((row) => {
+    const match = terms.every((term) => row.dataset.search.includes(term));
+    row.classList.toggle("hidden", !match);
+    if (match) visible += 1;
+  });
+  $("#menuSearchEmpty").classList.toggle("hidden", visible > 0 || rows.length === 0);
+}
+
+function applyTicketMode() {
+  const ticket = state.currentTicket;
+  const paying = Boolean(ticket) && state.ticketMode === "pay";
+  $("#ticketSurface").classList.toggle("hidden", paying);
+  $("#orderSummary").classList.toggle("hidden", paying);
+  $("#paymentSurface").classList.toggle("hidden", !paying);
+  $("#payAction").classList.toggle("hidden", !ticket || paying);
+  if (!ticket) return;
+  const settled = ticket.outstanding <= 0.009;
+  $("#payAction").textContent = settled ? "Payments" : `Pay ${fmt(ticket.outstanding)}`;
+  const itemCount = ticket.items.reduce((sum, item) => sum + money(item.quantity), 0);
+  $("#paySummary").classList.toggle("settled", settled);
+  $("#paySummary").classList.toggle("open-ticket", !settled);
+  $("#paySummary").innerHTML = `<strong>${ticket.table_no}</strong> · ${fmtQty(itemCount)} ${itemCount === 1 ? "item" : "items"} · ${settled ? "Settled" : `${fmt(ticket.outstanding)} remaining`}`;
+}
+
+async function setTicketMode(mode) {
+  if (mode === "pay") {
+    const saved = await flushAutosave();
+    if (!saved || !state.currentTicket) return;
+  }
+  state.ticketMode = mode;
+  applyTicketMode();
+  window.scrollTo({ top: 0 });
 }
 
 function renderFinalizedSplits() {
@@ -279,18 +387,16 @@ function renderFinalizedSplits() {
     .filter((payment) => Number(payment.id) !== Number(state.editingPaymentId))
     .map((payment) => {
       const type = payment.split_type === "percent" ? `${fmtQty(payment.split_percent)}%` : "Items";
-      const status = ticket.outstanding <= 0.009 ? "settled" : "recorded";
       const row = document.createElement("div");
       row.className = "final-split";
       row.innerHTML = `
         <div class="final-split-main">
           <div>
-            <strong>Split ${payment.split_no} · ${type} · ${payment.method}</strong>
+            <strong>Split ${payment.split_no} · ${type} · ${payment.method === "paypal" ? "PayPal" : "Cash"}</strong>
             <span>${fmt(payment.subtotal)} due · ${fmt(payment.tip)} tip · ${fmt(payment.tendered)} tendered · ${fmt(payment.change)} change</span>
           </div>
           <div class="final-split-actions">
             <strong>${fmt(payment.total_with_tip)}</strong>
-            <span class="status-pill ${status}">${status === "settled" ? "Settled" : "Recorded"}</span>
             <button data-edit-payment="${payment.id}" type="button">Edit</button>
           </div>
         </div>
@@ -304,7 +410,7 @@ function renderFinalizedSplits() {
 function renderTicketFilters() {
   const root = $("#ticketFilters");
   root.innerHTML = "";
-  state.menu.filter((item) => item.active).forEach((item) => {
+  state.menu.filter((item) => item.active && item.category === "food").forEach((item) => {
     const row = document.createElement("div");
     row.className = "filter-row";
     row.innerHTML = `
@@ -318,6 +424,7 @@ function renderTicketFilters() {
     const input = $("input", row);
     input.addEventListener("input", () => {
       state.ticketFilters[item.code] = Math.max(0, money(input.value));
+      updateTicketFilterSummary();
       renderTickets();
     });
     $$("button", row).forEach((button) => {
@@ -325,11 +432,33 @@ function renderTicketFilters() {
         const next = Math.max(0, (state.ticketFilters[item.code] || 0) + Number(button.dataset.step));
         state.ticketFilters[item.code] = next;
         input.value = next;
+        updateTicketFilterSummary();
         renderTickets();
       });
     });
     root.appendChild(row);
   });
+  updateTicketFilterSummary();
+}
+
+function updateTicketFilterSummary() {
+  const active = state.menu
+    .filter((item) => item.active && item.category === "food" && state.ticketFilters[item.code] > 0)
+    .map((item) => `${item.code} ×${fmtQty(state.ticketFilters[item.code])}`);
+  const summary = $("#ticketFilterSummary");
+  summary.textContent = active.join(" · ");
+  summary.classList.toggle("hidden", active.length === 0);
+  $("#filterPanel").classList.toggle("has-filters", active.length > 0);
+}
+
+function setTicketFiltersCollapsed(collapsed) {
+  $("#filterPanel").classList.toggle("collapsed", collapsed);
+  $("#toggleTicketFilters").setAttribute("aria-expanded", String(!collapsed));
+  try {
+    localStorage.setItem("ticketFiltersCollapsed", collapsed ? "1" : "0");
+  } catch {
+    // Storage can be unavailable; the panel just won't remember its state.
+  }
 }
 
 function addSplit(markAsDirty = true, payment = null) {
@@ -344,6 +473,8 @@ function addSplit(markAsDirty = true, payment = null) {
     node.dataset.paymentAllocations = JSON.stringify(payment.allocations || []);
   }
   $("strong", node).textContent = payment ? `Split ${splitNo} (editing)` : `Split ${splitNo}`;
+  // Only splits someone has interacted with count as payment drafts; a pre-filled split is just a suggestion.
+  node.addEventListener("input", () => touchSplit(node), true);
   $(".remove-split", node).addEventListener("click", async () => {
     if (payment) {
       if (!confirm("Remove this saved split?")) return;
@@ -367,6 +498,7 @@ function addSplit(markAsDirty = true, payment = null) {
     markDirty();
   });
   $(".fill-split", node).addEventListener("click", () => {
+    touchSplit(node);
     renderAllocations(node);
     payableItemsForSplit(node).forEach((item) => {
       const input = $(`.allocation input[data-code="${item.code}"]`, node);
@@ -378,12 +510,32 @@ function addSplit(markAsDirty = true, payment = null) {
     markDirty();
   });
   $(".save-split", node).addEventListener("click", () => saveSplit(node));
-  $(".split-mode", node).addEventListener("change", () => {
-    setSplitMode(node, $(".split-mode", node).value);
-    syncSplitAmountsToDue(node);
-    renderFollowingAllocations(node);
-    recalc();
-    markDirty();
+  $$(".mode-seg button", node).forEach((button) => {
+    button.addEventListener("click", () => {
+      if (splitMode(node) === button.dataset.mode) return;
+      touchSplit(node);
+      setSplitMode(node, button.dataset.mode);
+      syncSplitAmountsToDue(node);
+      renderFollowingAllocations(node);
+      recalc();
+      markDirty();
+    });
+  });
+  $$(".method-seg button", node).forEach((button) => {
+    button.addEventListener("click", () => {
+      touchSplit(node);
+      setSplitMethod(node, button.dataset.method);
+      recalc();
+      markDirty();
+    });
+  });
+  $$(".split-total, .split-tendered", node).forEach((input) => {
+    input.addEventListener("input", () => {
+      input.classList.remove("invalid");
+      showSplitError(node, "");
+      recalc();
+      markDirty();
+    });
   });
   $(".split-percent", node).addEventListener("input", () => {
     syncSplitAmountsToDue(node);
@@ -402,13 +554,15 @@ function addSplit(markAsDirty = true, payment = null) {
   });
   $("#splits").appendChild(node);
   setSplitMode(node, payment?.split_type || "items");
+  setSplitMethod(node, payment?.method || "cash");
   if (payment) {
-    $(".method", node).value = payment.method;
     $(".split-percent", node).value = payment.split_percent || "";
     $(".split-total", node).value = money(payment.total_with_tip).toFixed(2);
-    $(".split-tendered", node).value = money(payment.tendered).toFixed(2);
+    const exact = Math.abs(money(payment.tendered) - money(payment.total_with_tip)) < 0.005;
+    $(".split-tendered", node).value = exact ? "" : money(payment.tendered).toFixed(2);
   }
   renderAllocations(node);
+  if (!payment) syncSplitAmountsToDue(node);
   if (payment?.split_type === "items") {
     (payment.allocations || []).forEach((allocation) => {
       const input = $(`.allocation input[data-code="${allocation.menu_code}"]`, node);
@@ -434,9 +588,25 @@ function splitMode(split) {
   return $(".split-mode", split)?.value || "items";
 }
 
+function touchSplit(split) {
+  if (split.dataset.touched) return;
+  split.dataset.touched = "1";
+}
+
+function setSplitMethod(split, method) {
+  $(".method", split).value = method;
+  $$(".method-seg button", split).forEach((button) => {
+    button.classList.toggle("on", button.dataset.method === method);
+  });
+  $$(".cash-only", split).forEach((node) => node.classList.toggle("hidden", method !== "cash"));
+}
+
 function setSplitMode(split, mode) {
   $(".split-mode", split).value = mode;
   split.dataset.mode = mode;
+  $$(".mode-seg button", split).forEach((button) => {
+    button.classList.toggle("on", button.dataset.mode === mode);
+  });
   $(".percent-field", split).classList.toggle("hidden", mode !== "percent");
   $(".fill-split", split).classList.toggle("hidden", mode !== "items");
   renderAllocations(split);
@@ -467,27 +637,36 @@ function renderAllocations(split) {
     ? items.map((item) => {
       const value = money(previous[item.code]);
       return `
-        <label class="allocation">
-          <span>${item.code}</span>
-          <input data-code="${item.code}" data-price="${item.price}" type="number" min="0" max="${item.quantity}" step="0.01" value="${fmtQty(value)}">
-          <small class="allocation-status"></small>
-        </label>
+        <div class="allocation">
+          <div><strong>${item.name}</strong><span>${item.code}</span><span>${fmt(item.price)}</span></div>
+          <div class="qty-control">
+            <button type="button" data-step="-1" aria-label="Less ${item.code}">-</button>
+            <input data-code="${item.code}" data-price="${item.price}" type="number" min="0" max="${item.quantity}" step="0.01" value="${fmtQty(value)}" aria-label="${item.code} quantity">
+            <button type="button" data-step="1" aria-label="More ${item.code}">+</button>
+            <span class="of">of ${fmtQty(item.quantity)}</span>
+          </div>
+          <small class="allocation-status hidden"></small>
+        </div>
       `;
     }).join("")
-    : `<div class="empty">Add items before taking payment.</div>`;
-  $$("input", allocations).forEach((input) => {
-    updateAllocationFeedback(input);
-    input.addEventListener("input", () => {
+    : `<div class="empty">${state.currentTicket?.items?.length ? "Nothing left to split." : "Add items before taking payment."}</div>`;
+  $$(".allocation", allocations).forEach((row) => {
+    const input = $("input", row);
+    const changed = () => {
       updateAllocationFeedback(input);
       renderFollowingAllocations(split);
       recalc();
       markDirty();
-    });
-  });
-  $$(".split-grid input, .split-grid select", split).forEach((input) => {
-    input.addEventListener("input", () => {
-      recalc();
-      markDirty();
+    };
+    updateAllocationFeedback(input);
+    input.addEventListener("input", changed);
+    $$("button", row).forEach((button) => {
+      button.addEventListener("click", () => {
+        touchSplit(split);
+        const next = Math.min(money(input.max), Math.max(0, Math.round(money(input.value)) + Number(button.dataset.step)));
+        input.value = fmtQty(next);
+        changed();
+      });
     });
   });
 }
@@ -499,9 +678,9 @@ function updateAllocationFeedback(input) {
   const overBy = entered - available;
   const status = $(".allocation-status", row);
   row.classList.toggle("overcount", overBy > 0.009);
-  status.textContent = overBy > 0.009
-    ? `${fmtQty(entered)} / ${fmtQty(available)} - over by ${fmtQty(overBy)}`
-    : `${fmtQty(entered)} / ${fmtQty(available)} available`;
+  row.classList.toggle("none", entered <= 0);
+  status.classList.toggle("hidden", overBy <= 0.009);
+  status.textContent = overBy > 0.009 ? `Only ${fmtQty(available)} left - over by ${fmtQty(overBy)}` : "";
 }
 
 function renderFollowingAllocations(split) {
@@ -584,7 +763,7 @@ function splitData(row, index) {
     method: $(".method", row).value,
     subtotal: splitSubtotal(row),
     total_with_tip: money($(".split-total", row).value),
-    tendered: money($(".split-tendered", row).value),
+    tendered: splitTendered(row),
     allocations,
   };
 }
@@ -593,10 +772,18 @@ async function saveSplit(row) {
   if (!state.currentTicket) return;
   if (!validateTicketForSave()) return;
   const payment = splitData(row, Number(row.dataset.splitNo || 1) - 1);
-  if (payment.subtotal <= 0 && payment.total_with_tip <= 0) {
-    setStatus("Add something to this split before saving.");
+  if (payment.subtotal <= 0.004) {
+    showSplitError(row, "Add something to this split before saving.");
     return;
   }
+  if (payment.tendered < payment.total_with_tip) {
+    const tendered = $(".split-tendered", row);
+    tendered.classList.add("invalid");
+    tendered.focus();
+    showSplitError(row, `Tendered ${fmt(payment.tendered)} is less than the total ${fmt(payment.total_with_tip)}. Raise it, or clear it for exact money.`);
+    return;
+  }
+  showSplitError(row, "");
   try {
     const ticket = await savePaymentPayloads([payment], state.currentTicket);
     state.currentTicket = ticket;
@@ -607,8 +794,15 @@ async function saveSplit(row) {
     loadTicketIntoForm(ticket);
     await refreshAll();
   } catch (error) {
-    setStatus(error.message);
+    showSplitError(row, error.message);
   }
+}
+
+function showSplitError(row, message) {
+  const box = $(".split-error", row);
+  box.textContent = message;
+  box.classList.toggle("hidden", !message);
+  if (message) setStatus(message);
 }
 
 function splitAllocations(row) {
@@ -629,42 +823,94 @@ function splitSubtotal(row) {
 }
 
 function syncSplitAmountsToDue(row) {
-  const subtotal = splitSubtotal(row).toFixed(2);
-  $(".split-subtotal", row).value = subtotal;
-  $(".split-total", row).value = subtotal;
-  $(".split-tendered", row).value = subtotal;
+  const subtotal = splitSubtotal(row);
+  $(".split-total", row).value = subtotal.toFixed(2);
+  row.dataset.lastSubtotal = subtotal;
+}
+
+function splitTendered(row) {
+  // Blank tendered means exact money; PayPal is always exact.
+  const raw = $(".split-tendered", row).value;
+  if ($(".method", row).value === "paypal" || raw === "") return money($(".split-total", row).value);
+  return money(raw);
+}
+
+function renderOrderSummary() {
+  // On an open ticket, show what was there when it was opened, then this visit's changes as
+  // separate green (added) or red (removed) lines. Reopening the ticket folds them together.
+  const opened = state.currentTicket ? state.openedQuantities : {};
+  const lines = [];
+  const changes = [];
+  state.menu.forEach((item) => {
+    const quantity = state.quantities[item.code] || 0;
+    const before = state.currentTicket ? opened[item.code] || 0 : quantity;
+    const price = ticketItemByCode(item.code)?.unit_price || item.price;
+    if (before > 0) lines.push({ item, quantity: before, price });
+    if (quantity !== before) changes.push({ item, quantity: quantity - before, price });
+  });
+  const total = state.menu.reduce((sum, item) => {
+    const price = ticketItemByCode(item.code)?.unit_price || item.price;
+    return sum + (state.quantities[item.code] || 0) * price;
+  }, 0);
+  const count = state.menu.reduce((sum, item) => sum + (state.quantities[item.code] || 0), 0);
+  const line = ({ item, quantity, price }, kind = "") => `
+    <li class="${kind || (item.category === "food" ? "food" : "")}">
+      <span class="qty">${quantity > 0 && kind ? "+" : ""}${fmtQty(quantity)}&times;</span>
+      <span class="name">${item.name}</span>
+      <span class="amount">${fmt(quantity * price)}</span>
+    </li>
+  `;
+  const changeLines = changes.map((change) => line(change, change.quantity > 0 ? "added" : "removed")).join("");
+  $("#orderSummaryCount").textContent = count ? `${fmtQty(count)} ${count === 1 ? "item" : "items"}` : "";
+  $("#orderSummaryLines").innerHTML = lines.length || changes.length
+    ? lines.map((entry) => line(entry)).join("")
+      + (lines.length && changes.length ? `<li class="change-head">Added now</li>` : "")
+      + changeLines
+    : `<li class="none">Nothing added yet</li>`;
+  $("#orderSummaryTotal").textContent = fmt(total);
 }
 
 function recalc() {
+  renderOrderSummary();
   const itemSub = draftBaseSubtotal();
   let draftSubtotal = 0;
   let tip = 0;
-  let change = 0;
   let totalWithTip = 0;
-  $$(".split").forEach((row, index) => {
+  const splits = $$(".editable-split");
+  splits.forEach((row) => {
     const subtotal = splitSubtotal(row);
-    const subtotalInput = $(".split-subtotal", row);
     const totalInput = $(".split-total", row);
     const tenderedInput = $(".split-tendered", row);
-    subtotalInput.value = subtotal.toFixed(2);
+    if (!row.dataset.touched && !row.dataset.paymentId) {
+      totalInput.value = subtotal.toFixed(2);
+    } else if (row.dataset.lastSubtotal !== undefined && !totalInput.matches(":focus")) {
+      // Items changed after a total was typed: keep the tip, move the total with the subtotal.
+      const delta = subtotal - money(row.dataset.lastSubtotal);
+      if (Math.abs(delta) > 0.004) totalInput.value = Math.max(0, money(totalInput.value) + delta).toFixed(2);
+    }
+    row.dataset.lastSubtotal = subtotal;
     if (money(totalInput.value) < subtotal && !totalInput.matches(":focus")) totalInput.value = subtotal.toFixed(2);
-    if (money(tenderedInput.value) < money(totalInput.value) && !tenderedInput.matches(":focus")) tenderedInput.value = money(totalInput.value).toFixed(2);
     const splitTotal = money(totalInput.value);
     const splitTip = splitTotal - subtotal;
-    const splitChange = Math.max(0, money(tenderedInput.value) - splitTotal);
+    const splitChange = Math.max(0, splitTendered(row) - splitTotal);
+    tenderedInput.placeholder = splitTotal.toFixed(2);
     $(".split-due", row).textContent = fmt(subtotal);
     $(".split-tip", row).textContent = fmt(splitTip);
     $(".split-change", row).textContent = fmt(splitChange);
+    $(".save-split", row).textContent = row.dataset.paymentId ? "Save changes" : "Done";
+    const nothingSelected = subtotal <= 0.004;
+    $(".save-split", row).disabled = nothingSelected;
+    $(".save-split", row).title = nothingSelected ? (splitMode(row) === "percent" ? "Enter a percentage first" : "Select items first") : "";
+    $(".remove-split", row).classList.toggle("hidden", splits.length < 2 && !row.dataset.paymentId);
     draftSubtotal += subtotal;
     tip += splitTip;
-    change += splitChange;
     totalWithTip += splitTotal;
   });
   $("#orderSubtotal").textContent = fmt(itemSub);
   $("#orderRemainingAfterDraft").textContent = fmt(Math.max(0, itemSub - draftSubtotal));
   $("#orderTips").textContent = fmt(tip);
   $("#orderTotal").textContent = fmt(totalWithTip);
-  $("#orderChange").textContent = fmt(change);
+  $("#paymentTotals").classList.toggle("hidden", splits.length < 2);
 }
 
 function draftBaseSubtotal() {
@@ -691,6 +937,7 @@ function orderPayload() {
 function paymentPayloads() {
   if (!state.currentTicket) return [];
   return $$(".editable-split")
+    .filter((row) => row.dataset.touched)
     .map(splitData)
     .filter((payment) => payment.subtotal > 0 || payment.total_with_tip > 0);
 }
@@ -703,6 +950,7 @@ function validateTicketForSave() {
   const tableInput = $("#tableNo");
   clearFieldInvalid(tableInput);
   if (!tableInput.value.trim()) {
+    setTableLocked(false);
     markFieldInvalid(tableInput, "Add a table or person before saving.");
     return false;
   }
@@ -735,7 +983,7 @@ async function saveCurrentWork(
       let ticket = await api(`/api/orders/${state.currentTicket.id}`, {
         method: "PUT",
         body: JSON.stringify({
-          table_no: $("#tableNo").value.trim(),
+          table_no: state.currentTicket.table_no,
           note: $("#orderNote").value.trim(),
           items: activeItems().map((item) => ({ menu_code: item.code, quantity: item.quantity })),
         }),
@@ -816,12 +1064,17 @@ async function flushAutosave() {
 function clearOrder() {
   stopAutosaveTimer();
   state.currentTicket = null;
+  state.ticketMode = "edit";
+  state.ticketModeId = null;
   state.dirty = false;
   state.quantities = {};
   state.menu.forEach((item) => { state.quantities[item.code] = 0; });
   clearFieldInvalid($("#tableNo"));
   $("#tableNo").value = "";
+  setTableLocked(false);
+  $("#tableClash").classList.add("hidden");
   $("#orderNote").value = "";
+  $("#menuSearch").value = "";
   $("#splits").innerHTML = "";
   state.splitCount = 0;
   renderMenuPicker();
@@ -830,16 +1083,27 @@ function clearOrder() {
 }
 
 function loadTicketIntoForm(ticket) {
+  const freshOpen = state.ticketModeId !== ticket.id;
+  if (freshOpen) {
+    state.ticketMode = "edit";
+    state.ticketModeId = ticket.id;
+    state.openedQuantities = Object.fromEntries(ticket.items.map((item) => [item.menu_code, money(item.quantity)]));
+  }
   state.currentTicket = ticket;
   state.editingPaymentId = null;
   state.quantities = {};
   state.menu.forEach((item) => { state.quantities[item.code] = 0; });
   ticket.items.forEach((item) => { state.quantities[item.menu_code] = item.quantity; });
-  $("#tableNo").value = ticket.table_no;
+  // An autosave reload must not clobber a table edit in progress.
+  if (freshOpen || document.activeElement !== $("#tableNo")) {
+    $("#tableNo").value = ticket.table_no;
+    setTableLocked(true);
+  }
+  $("#tableClash").classList.add("hidden");
   $("#orderNote").value = ticket.note || "";
   $("#splits").innerHTML = "";
   state.splitCount = 0;
-  addSplit(false);
+  if (ticket.outstanding > 0.009) addSplit(false);
   renderMenuPicker();
   state.dirty = false;
   renderTicketTabs();
@@ -856,10 +1120,15 @@ async function openTicketTab(id) {
   }
   const ticket = await api(`/api/orders/${id}`);
   upsertTicketTab(ticket);
+  state.ticketModeId = null; // every open is a fresh visit: Edit mode, and earlier additions folded in
   loadTicketIntoForm(ticket);
   $$(".view").forEach((panel) => panel.classList.toggle("active", panel.id === "view-order"));
   $$(".tab[data-view]").forEach((tab) => tab.classList.remove("active"));
   renderTicketTabs();
+}
+
+function tableLabel(tableNo) {
+  return /^\d+$/.test(String(tableNo).trim()) ? `Table ${String(tableNo).trim()}` : tableNo;
 }
 
 async function renderTickets() {
@@ -874,8 +1143,8 @@ async function renderTickets() {
   $("#ticketList").innerHTML = tickets.length ? tickets.map((ticket) => `
     <div class="ticket-row ${ticket.outstanding <= 0.009 ? "settled" : "open-ticket"}">
       <div>
-        <strong>#${ticket.id} · ${ticket.table_no} · ${fmt(ticket.outstanding)} due</strong>
-        <span>${ticket.items || "No items"}${ticket.note ? ` · ${ticket.note}` : ""}</span>
+        <strong>${tableLabel(ticket.table_no)}</strong>
+        <span class="due">${ticket.outstanding <= 0.009 ? "Settled" : `${fmt(ticket.outstanding)} due`}</span>
       </div>
       <div class="row-actions">
         <button data-open-ticket="${ticket.id}" type="button">Open</button>
@@ -895,15 +1164,18 @@ async function renderTickets() {
 }
 
 function renderMenuEditor() {
-  $("#menuEditor").innerHTML = state.menu.map((item, index) => `
-    <div class="editor-row" data-menu-row="${item.code}">
-      <input class="edit-code" value="${item.code}" disabled>
+  $("#menuEditor").innerHTML = state.menu.map((item) => `
+    <div class="editor-row ${item.category === "food" ? "food" : ""}" data-menu-row="${item.code}">
+      <button class="drag-handle" type="button" title="Drag to reorder" aria-label="Reorder ${item.code}: drag, or press up and down arrows">
+        <svg viewBox="0 0 10 16" aria-hidden="true"><circle cx="2.5" cy="3" r="1.4"/><circle cx="7.5" cy="3" r="1.4"/><circle cx="2.5" cy="8" r="1.4"/><circle cx="7.5" cy="8" r="1.4"/><circle cx="2.5" cy="13" r="1.4"/><circle cx="7.5" cy="13" r="1.4"/></svg>
+      </button>
+      <input class="edit-code" value="${item.code}" autocomplete="off" aria-label="Code">
       <input class="edit-name" value="${item.name}">
+      <select class="edit-category" aria-label="Type">
+        <option value="food" ${item.category === "food" ? "selected" : ""}>Food</option>
+        <option value="drink" ${item.category === "drink" ? "selected" : ""}>Drink</option>
+      </select>
       <input class="edit-price" type="number" min="0" step="0.01" value="${item.price}">
-      <div class="order-actions">
-        <button class="icon-button" data-move-menu-code="${item.code}" data-direction="-1" type="button" title="Move up" aria-label="Move item up" ${index === 0 ? "disabled" : ""}>&#9650;</button>
-        <button class="icon-button" data-move-menu-code="${item.code}" data-direction="1" type="button" title="Move down" aria-label="Move item down" ${index === state.menu.length - 1 ? "disabled" : ""}>&#9660;</button>
-      </div>
       <button class="danger" data-delete-menu="${item.code}" type="button">Delete</button>
     </div>
   `).join("");
@@ -911,30 +1183,106 @@ function renderMenuEditor() {
     input.addEventListener("input", () => scheduleMenuItemSave(input.closest(".editor-row")));
     input.addEventListener("blur", () => saveMenuRow(input.closest(".editor-row")));
   });
-  $$("[data-move-menu-code]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      try {
-        const index = state.menu.findIndex((item) => item.code === button.dataset.moveMenuCode);
-        const nextIndex = index + Number(button.dataset.direction);
-        if (index < 0 || nextIndex < 0 || nextIndex >= state.menu.length) return;
-        const nextMenu = [...state.menu];
-        [nextMenu[index], nextMenu[nextIndex]] = [nextMenu[nextIndex], nextMenu[index]];
-        const menu = await api("/api/menu/reorder", {
-          method: "POST",
-          body: JSON.stringify({ codes: nextMenu.map((item) => item.code) }),
-        });
-        applyMenu(menu);
-        setStatus("Menu order saved");
-      } catch (error) {
-        setStatus(error.message);
-      }
+  $$(".edit-category").forEach((select) => {
+    select.addEventListener("change", () => {
+      select.closest(".editor-row").classList.toggle("food", select.value === "food");
+      saveMenuRow(select.closest(".editor-row"));
+    });
+  });
+  $$(".edit-code").forEach((input) => {
+    input.addEventListener("change", () => saveMenuRow(input.closest(".editor-row")));
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") input.blur();
+    });
+  });
+  $$(".drag-handle").forEach((handle) => {
+    const row = handle.closest(".editor-row");
+    handle.addEventListener("pointerdown", (event) => startMenuDrag(event, row));
+    handle.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      event.preventDefault();
+      const sibling = event.key === "ArrowUp" ? row.previousElementSibling : row.nextElementSibling;
+      if (!sibling) return;
+      row.parentElement.insertBefore(row, event.key === "ArrowUp" ? sibling : sibling.nextElementSibling);
+      handle.focus();
+      saveMenuOrder();
     });
   });
   $$("[data-delete-menu]").forEach((button) => {
     button.addEventListener("click", async () => {
-      await api(`/api/menu/${button.dataset.deleteMenu}`, { method: "DELETE" });
+      await api(`/api/menu/${encodeURIComponent(button.dataset.deleteMenu)}`, { method: "DELETE" });
       await loadMenu();
     });
+  });
+}
+
+function menuOrderFromEditor() {
+  return $$(".editor-row", $("#menuEditor")).map((row) => row.dataset.menuRow);
+}
+
+function startMenuDrag(event, row) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  const list = row.parentElement;
+  const before = menuOrderFromEditor().join("\n");
+  let pointerY = event.clientY;
+  let frame = null;
+  row.classList.add("dragging");
+  list.classList.add("sorting");
+
+  const reposition = () => {
+    const next = $$(".editor-row:not(.dragging)", list).find((other) => {
+      const box = other.getBoundingClientRect();
+      return pointerY < box.top + box.height / 2;
+    });
+    if (next) {
+      if (row.nextElementSibling !== next) list.insertBefore(row, next);
+    } else if (list.lastElementChild !== row) {
+      list.appendChild(row);
+    }
+  };
+  // Scroll while the pointer is held near the top or bottom edge, so long menus can be crossed.
+  const autoScroll = () => {
+    const edge = 60;
+    const step = pointerY < edge ? -14 : pointerY > window.innerHeight - edge ? 14 : 0;
+    if (step) {
+      window.scrollBy(0, step);
+      reposition();
+    }
+    frame = requestAnimationFrame(autoScroll);
+  };
+  const move = (moveEvent) => {
+    pointerY = moveEvent.clientY;
+    reposition();
+  };
+  const end = () => {
+    cancelAnimationFrame(frame);
+    document.removeEventListener("pointermove", move);
+    document.removeEventListener("pointerup", end);
+    document.removeEventListener("pointercancel", end);
+    row.classList.remove("dragging");
+    list.classList.remove("sorting");
+    if (menuOrderFromEditor().join("\n") !== before) saveMenuOrder();
+  };
+  document.addEventListener("pointermove", move);
+  document.addEventListener("pointerup", end);
+  document.addEventListener("pointercancel", end);
+  frame = requestAnimationFrame(autoScroll);
+}
+
+function saveMenuOrder() {
+  const codes = menuOrderFromEditor();
+  // Chain saves so quick successive moves reach the server in order.
+  state.menuOrderSave = (state.menuOrderSave || Promise.resolve()).then(async () => {
+    try {
+      state.menu = await api("/api/menu/reorder", { method: "POST", body: JSON.stringify({ codes }) });
+      renderMenuPicker();
+      renderTicketFilters();
+      setStatus("Menu order saved");
+    } catch (error) {
+      setStatus(error.message);
+      await loadMenu();
+    }
   });
 }
 
@@ -950,32 +1298,58 @@ async function saveMenuRow(row) {
   if (!code) return;
   window.clearTimeout(state.menuSaveTimers[code]);
   delete state.menuSaveTimers[code];
+  const codeInput = $(".edit-code", row);
+  const newCode = codeInput.value.trim();
   const name = $(".edit-name", row).value.trim();
   const price = $(".edit-price", row).value;
-  if (!name || price === "") return;
+  const category = $(".edit-category", row).value;
+  if (!newCode || !name || price === "") return;
   try {
-    const item = await api(`/api/menu/${code}`, {
+    const item = await api(`/api/menu/${encodeURIComponent(code)}`, {
       method: "PUT",
-      body: JSON.stringify({ name, price }),
+      body: JSON.stringify({ code: newCode, name, price, category }),
     });
+    if (item.code !== code) {
+      renameCodeInState(code, item.code);
+      await loadMenu();
+      setStatus(`Renamed ${code} to ${item.code}`);
+      return;
+    }
     const index = state.menu.findIndex((menuItem) => menuItem.code === code);
     if (index >= 0) state.menu[index] = item;
+    renderTicketFilters();
     setStatus(`Saved ${code}`);
   } catch (error) {
+    codeInput.value = code;
     setStatus(error.message);
   }
+}
+
+function renameCodeInState(oldCode, newCode) {
+  [state.quantities, state.ticketFilters].forEach((values) => {
+    if (oldCode in values) {
+      values[newCode] = values[oldCode];
+      delete values[oldCode];
+    }
+  });
 }
 
 async function addMenuItem() {
   try {
     await api("/api/menu", {
       method: "POST",
-      body: JSON.stringify({ code: $("#menuCode").value, name: $("#menuName").value, price: $("#menuPrice").value }),
+      body: JSON.stringify({
+        code: $("#menuCode").value,
+        name: $("#menuName").value,
+        price: $("#menuPrice").value,
+        category: $("#menuCategory").value,
+      }),
     });
     $("#menuCode").value = "";
     $("#menuName").value = "";
     $("#menuPrice").value = "";
     await loadMenu();
+    $("#menuCode").focus();
     setStatus("Menu item saved");
   } catch (error) {
     setStatus(error.message);
@@ -1003,9 +1377,22 @@ function metric(label, value, className = "") {
 
 async function renderSummary() {
   const summary = await api("/api/summary");
+  const sold = (summary.sold || []).map((item) => ({
+    ...item,
+    category: item.category || state.menu.find((menuItem) => menuItem.code === item.code)?.category || "food",
+  }));
+  const categoryTotals = Object.fromEntries(["food", "drink"].map((category) => {
+    const items = sold.filter((item) => item.category === category);
+    return [category, {
+      quantity: items.reduce((sum, item) => sum + money(item.quantity), 0),
+      revenue: items.reduce((sum, item) => sum + money(item.revenue), 0),
+    }];
+  }));
   $("#metrics").innerHTML = [
     metric("Orders", summary.order_count),
     metric("All tickets", fmt(summary.ticket_total)),
+    metric("Food", fmt(categoryTotals.food.revenue)),
+    metric("Drinks", fmt(categoryTotals.drink.revenue)),
     metric("Paid", fmt(summary.paid_total)),
     metric("Open", fmt(summary.open_total), summary.open_total ? "warn" : ""),
     metric("Paid incl. tips", fmt(summary.total)),
@@ -1017,12 +1404,24 @@ async function renderSummary() {
   ].join("");
   $("#openingCash").value = summary.opening_cash.toFixed(2);
   $("#actualCash").value = summary.actual_cash === null ? "" : summary.actual_cash.toFixed(2);
-  $("#soldList").innerHTML = summary.sold.map((item) => `
-    <div class="sold-row">
-      <div><strong>${item.code} · ${item.name}</strong><span>${item.quantity} sold</span></div>
-      <strong>${fmt(item.revenue)}</strong>
-    </div>
-  `).join("");
+  $("#soldList").innerHTML = [["food", "Food"], ["drink", "Drinks"]].map(([category, label]) => {
+    const items = sold.filter((item) => item.category === category);
+    if (!items.length) return "";
+    const totals = categoryTotals[category];
+    return `
+      <div class="sold-group-head">
+        <h3>${label}</h3>
+        <span>${fmtQty(totals.quantity)} sold</span>
+        <strong>${fmt(totals.revenue)}</strong>
+      </div>
+      ${items.map((item) => `
+        <div class="sold-row ${category === "food" ? "food" : ""}">
+          <div><strong>${item.name}</strong><span>${item.code} · ${fmtQty(item.quantity)} sold</span></div>
+          <strong>${fmt(item.revenue)}</strong>
+        </div>
+      `).join("")}
+    `;
+  }).join("") || `<div class="empty">Nothing sold yet.</div>`;
 }
 
 async function saveSettings() {
@@ -1038,6 +1437,7 @@ async function renderEvents() {
   const active = await api("/api/events/active");
   $("#activeEventName").value = active.name;
   $("#activeEventDate").value = active.event_date;
+  $("#barExportActive").dataset.barExport = active.id;
   const events = (await api("/api/events")).filter((event) => event.status === "archived");
   $("#eventList").innerHTML = events.length ? events.map((event) => {
     let menu = [];
@@ -1057,6 +1457,7 @@ async function renderEvents() {
           <small>${menuText}</small>
         </div>
         <div class="row-actions">
+          <button data-bar-export="${event.id}" type="button">Drinks for bar</button>
           <button data-export-event="${event.id}" type="button">Export</button>
         </div>
       </div>
@@ -1067,6 +1468,12 @@ async function renderEvents() {
       window.open(`/api/events/${button.dataset.exportEvent}/export`, "_blank");
     });
   });
+  $$("#eventList [data-bar-export]").forEach((button) => button.addEventListener("click", openBarExport));
+}
+
+function openBarExport(event) {
+  const id = event.currentTarget.dataset.barExport;
+  if (id) window.open(`/api/events/${id}/bar-export`, "_blank");
 }
 
 async function saveActiveEvent() {
@@ -1128,28 +1535,70 @@ $$(".tab").forEach((tab) => tab.addEventListener("click", () => switchView(tab.d
 document.addEventListener("focusin", selectInputValue);
 $("#saveAction").addEventListener("click", saveAction);
 $("#clearOrder").addEventListener("click", clearOrderAction);
+$("#payAction").addEventListener("click", () => setTicketMode("pay"));
+$("#backToEdit").addEventListener("click", () => setTicketMode("edit"));
 $("#tableNo").addEventListener("input", () => {
   clearFieldInvalid($("#tableNo"));
-  markDirty({ schedule: Boolean(state.currentTicket) });
+  // An open ticket's table only changes after confirmation (see the change handler).
+  if (!state.currentTicket) markDirty();
 });
+$("#tableNo").addEventListener("change", () => {
+  const ticket = state.currentTicket;
+  if (!ticket) return;
+  const input = $("#tableNo");
+  const next = input.value.trim();
+  if (next === ticket.table_no) return;
+  if (next && confirm(`Move this ticket from ${tableLabel(ticket.table_no)} to ${tableLabel(next)}?`)) {
+    ticket.table_no = next;
+    markDirty({ schedule: true });
+  } else {
+    input.value = ticket.table_no;
+  }
+});
+$("#tableNo").addEventListener("keydown", (event) => {
+  const input = $("#tableNo");
+  if (event.key === "Enter") {
+    event.preventDefault();
+    // Moving focus fires change (confirmation on open tickets) and blur (locks the label).
+    if (input.value.trim()) $("#menuSearch").focus();
+  } else if (event.key === "Escape" && state.currentTicket) {
+    input.value = state.currentTicket.table_no;
+    input.blur();
+  }
+});
+$("#tableNo").addEventListener("blur", () => {
+  setTableLocked(true);
+  checkTableClash();
+});
+$("#openClash").addEventListener("click", openClashingTicket);
+$("#editTable").addEventListener("click", editTable);
 $("#orderNote").addEventListener("input", () => markDirty({ schedule: Boolean(state.currentTicket) }));
 $("#addSplit").addEventListener("click", () => {
   if (state.currentTicket?.outstanding <= 0.009) return;
   addSplit(true);
 });
+$("#menuSearch").addEventListener("input", filterMenuPicker);
 $("#ticketSearch").addEventListener("input", renderTickets);
 $("#openOnly").addEventListener("change", renderTickets);
-$("#clearTicketFilters").addEventListener("click", () => {
-  state.ticketFilters = {};
-  state.menu.forEach((item) => { state.ticketFilters[item.code] = 0; });
-  $("#ticketSearch").value = "";
-  renderTicketFilters();
-  renderTickets();
+$("#clearTicketFilters").addEventListener("click", clearTicketFilters);
+$("#toggleTicketFilters").addEventListener("click", () => {
+  setTicketFiltersCollapsed(!$("#filterPanel").classList.contains("collapsed"));
 });
+try {
+  if (localStorage.getItem("ticketFiltersCollapsed") === "1") setTicketFiltersCollapsed(true);
+} catch {
+  // Ignore unavailable storage.
+}
 $("#addMenuItem").addEventListener("click", addMenuItem);
+$$(".menu-form input").forEach((input) => {
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") addMenuItem();
+  });
+});
 $("#refresh").addEventListener("click", refreshAll);
 $("#saveSettings").addEventListener("click", saveSettings);
 $("#saveActiveEvent").addEventListener("click", saveActiveEvent);
 $("#closeEvent").addEventListener("click", closeEvent);
+$("#barExportActive").addEventListener("click", openBarExport);
 
 start().catch((error) => setStatus(error.message));

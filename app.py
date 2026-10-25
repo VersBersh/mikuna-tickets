@@ -8,7 +8,7 @@ from datetime import date
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parent
@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS menu_items (
     name TEXT NOT NULL,
     price REAL NOT NULL CHECK (price >= 0),
     sort_order INTEGER NOT NULL DEFAULT 0,
-    active INTEGER NOT NULL DEFAULT 1
+    active INTEGER NOT NULL DEFAULT 1,
+    category TEXT NOT NULL DEFAULT 'food' CHECK (category IN ('food', 'drink'))
 );
 
 CREATE TABLE IF NOT EXISTS orders (
@@ -162,7 +163,7 @@ def current_menu_snapshot(conn: sqlite3.Connection) -> str:
     menu = rows(
         conn,
         """
-        SELECT code, name, price, active
+        SELECT code, name, price, active, category
         FROM menu_items
         ORDER BY sort_order, code
         """,
@@ -177,6 +178,11 @@ def ensure_event_state(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE orders ADD COLUMN event_id INTEGER")
     if "status" not in order_columns:
         conn.execute("ALTER TABLE orders ADD COLUMN status TEXT NOT NULL DEFAULT 'open'")
+    if "category" not in table_columns(conn, "menu_items"):
+        conn.execute(
+            "ALTER TABLE menu_items ADD COLUMN category TEXT NOT NULL DEFAULT 'food'"
+            " CHECK (category IN ('food', 'drink'))"
+        )
     item_columns = table_columns(conn, "order_items")
     if "menu_name" not in item_columns:
         conn.execute("ALTER TABLE order_items ADD COLUMN menu_name TEXT NOT NULL DEFAULT ''")
@@ -374,7 +380,7 @@ def ticket_rows(
           SELECT 1
           FROM order_items filter_items
           WHERE filter_items.order_id = o.id
-            AND filter_items.menu_code = ?
+            AND filter_items.menu_code = ? COLLATE NOCASE
           GROUP BY filter_items.order_id
           HAVING SUM(filter_items.quantity) >= ?
         )
@@ -478,16 +484,25 @@ def summary(conn: sqlite3.Connection, event_id: int | None = None) -> dict:
         SELECT oi.menu_code AS code,
                COALESCE(NULLIF(oi.menu_name, ''), oi.menu_code) AS name,
                oi.unit_price AS price,
+               COALESCE(mi.category, 'food') AS category,
                COALESCE(SUM(oi.quantity), 0) AS quantity,
                ROUND(COALESCE(SUM(oi.quantity * oi.unit_price), 0), 2) AS revenue
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
+        LEFT JOIN menu_items mi ON mi.code = oi.menu_code
         WHERE o.event_id = ?
         GROUP BY oi.menu_code, name, oi.unit_price
-        ORDER BY oi.menu_code
+        ORDER BY COALESCE(mi.sort_order, 999999), oi.menu_code
         """,
         (event_id,),
     )
+    category_totals = {
+        category: {
+            "quantity": sum(item["quantity"] for item in sold if item["category"] == category),
+            "revenue": round(sum(item["revenue"] for item in sold if item["category"] == category), 2),
+        }
+        for category in ("food", "drink")
+    }
     expected_cash = opening_cash + payment_rows["cash_total"] - payment_rows["cash_change"]
     return {
         "order_count": order_count,
@@ -509,6 +524,7 @@ def summary(conn: sqlite3.Connection, event_id: int | None = None) -> dict:
             else None
         ),
         "sold": sold,
+        "category_totals": category_totals,
     }
 
 
@@ -647,6 +663,90 @@ def event_report_html(conn: sqlite3.Connection, event_id: int) -> str:
     </section>
   </body>
 </html>"""
+
+
+def bar_report_html(conn: sqlite3.Connection, event_id: int) -> str:
+    event = conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+    if not event:
+        raise KeyError("Event not found")
+    event_data = dict(event)
+    totals = summary(conn, event_id)
+    drinks = [item for item in totals["sold"] if item["category"] == "drink"]
+    drink_totals = totals["category_totals"]["drink"]
+    open_drinks = conn.execute(
+        """
+        SELECT COUNT(DISTINCT o.id) AS tickets,
+               ROUND(COALESCE(SUM(oi.quantity * oi.unit_price), 0), 2) AS amount
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        LEFT JOIN menu_items mi ON mi.code = oi.menu_code
+        WHERE o.event_id = ? AND COALESCE(mi.category, 'food') = 'drink'
+          AND o.id IN (
+            SELECT o2.id FROM orders o2
+            WHERE o2.event_id = ?
+              AND (SELECT COALESCE(SUM(quantity * unit_price), 0) FROM order_items WHERE order_id = o2.id)
+                  - (SELECT COALESCE(SUM(subtotal), 0) FROM payments WHERE order_id = o2.id) > 0.009
+          )
+        """,
+        (event_id, event_id),
+    ).fetchone()
+    drink_rows = "".join(
+        f"""
+        <tr>
+          <td>{esc(item["name"])}</td>
+          <td class="num">{esc(fmt_qty(item["quantity"]))}</td>
+          <td class="num">{currency(item["price"])}</td>
+          <td class="num">{currency(item["revenue"])}</td>
+        </tr>
+        """
+        for item in drinks
+    ) or "<tr><td colspan='4'>No drinks sold.</td></tr>"
+    open_note = (
+        f"<p class='warn'>{open_drinks['tickets']} open "
+        f"{'ticket has' if open_drinks['tickets'] == 1 else 'tickets have'} "
+        f"{currency(open_drinks['amount'])} of drinks not yet paid. They are included above.</p>"
+        if open_drinks["tickets"]
+        else ""
+    )
+    title = f"{event_data['name']} - {event_data['event_date']}"
+    return f"""<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>{esc(title)} Bar Drinks</title>
+    <style>
+      body {{ font-family: Segoe UI, Arial, sans-serif; color: #242424; margin: 32px; line-height: 1.4; max-width: 720px; }}
+      h1, h2 {{ margin: 0 0 12px; }}
+      .muted {{ color: #616161; }}
+      .warn {{ color: #8a4b00; font-weight: 600; }}
+      .owed {{ border: 1px solid #ddd; border-radius: 6px; padding: 14px 16px; margin: 20px 0; display: flex; justify-content: space-between; align-items: baseline; }}
+      .owed strong {{ font-size: 26px; }}
+      table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+      th, td {{ border-bottom: 1px solid #e5e5e5; padding: 7px 8px; text-align: left; }}
+      th {{ background: #f5f5f5; font-size: 12px; text-transform: uppercase; color: #616161; }}
+      .num {{ text-align: right; }}
+      tfoot td {{ font-weight: 700; border-bottom: none; border-top: 2px solid #242424; }}
+      @media print {{ body {{ margin: 18mm; }} }}
+    </style>
+  </head>
+  <body>
+    <h1>{esc(event_data["name"])} - Drinks</h1>
+    <p class="muted">{esc(event_data["event_date"])}</p>
+    <div class="owed"><span>Drinks total ({esc(fmt_qty(drink_totals["quantity"]))} drinks)</span><strong>{currency(drink_totals["revenue"])}</strong></div>
+    <table>
+      <thead><tr><th>Drink</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Total</th></tr></thead>
+      <tbody>{drink_rows}</tbody>
+      <tfoot><tr><td>Total</td><td class="num">{esc(fmt_qty(drink_totals["quantity"]))}</td><td></td><td class="num">{currency(drink_totals["revenue"])}</td></tr></tfoot>
+    </table>
+    <p class="muted">Menu prices as charged. Tips are not included.</p>
+    {open_note}
+  </body>
+</html>"""
+
+
+def fmt_qty(value: object) -> str:
+    number = money(value)
+    return str(int(number)) if number == int(number) else f"{number:g}"
 
 
 def ticket_report_html(ticket: dict) -> str:
@@ -987,7 +1087,7 @@ def active_menu(conn: sqlite3.Connection) -> list[dict]:
     return rows(
         conn,
         """
-        SELECT code, name, price, active
+        SELECT code, name, price, active, category
         FROM menu_items
         WHERE active = 1
         ORDER BY sort_order, code
@@ -1009,37 +1109,132 @@ def normalize_active_menu_order(conn: sqlite3.Connection) -> None:
         )
 
 
+def find_menu_item(conn: sqlite3.Connection, code: str, exclude: str | None = None):
+    return conn.execute(
+        """
+        SELECT code, name, price, sort_order, active, category
+        FROM menu_items
+        WHERE code = ? COLLATE NOCASE AND code IS NOT ?
+        """,
+        (code, exclude),
+    ).fetchone()
+
+
+def move_menu_code(
+    conn: sqlite3.Connection, old: str, new: str, event_id: int | None = None
+) -> None:
+    """Repoint order and payment lines from old to new (one event, or all when event_id is None),
+    then drop the old menu row, keeping it inactive if older events still use it."""
+    order_scope = "" if event_id is None else " AND order_id IN (SELECT id FROM orders WHERE event_id = ?)"
+    payment_scope = "" if event_id is None else (
+        " AND payment_id IN (SELECT p.id FROM payments p JOIN orders o ON o.id = p.order_id WHERE o.event_id = ?)"
+    )
+    scope_params = () if event_id is None else (event_id,)
+    conn.execute(
+        f"UPDATE order_items SET menu_code = ? WHERE menu_code = ?{order_scope}",
+        (new, old, *scope_params),
+    )
+    conn.execute(
+        f"UPDATE payment_allocations SET menu_code = ? WHERE menu_code = ?{payment_scope}",
+        (new, old, *scope_params),
+    )
+    still_used = conn.execute(
+        """
+        SELECT 1 FROM order_items WHERE menu_code = ?
+        UNION ALL
+        SELECT 1 FROM payment_allocations WHERE menu_code = ?
+        LIMIT 1
+        """,
+        (old, old),
+    ).fetchone()
+    if still_used:
+        conn.execute("UPDATE menu_items SET active = 0 WHERE code = ?", (old,))
+    else:
+        conn.execute("DELETE FROM menu_items WHERE code = ?", (old,))
+
+
+def recase_menu_item(conn: sqlite3.Connection, item: sqlite3.Row, new: str) -> None:
+    """Give an item a code that differs only in letter case, everywhere it is used."""
+    conn.execute(
+        "INSERT INTO menu_items (code, name, price, sort_order, active, category) VALUES (?, ?, ?, ?, ?, ?)",
+        (new, item["name"], item["price"], item["sort_order"], item["active"], item["category"]),
+    )
+    move_menu_code(conn, item["code"], new)
+
+
+def rename_menu_item(conn: sqlite3.Connection, old: str, new: str) -> None:
+    source = conn.execute(
+        "SELECT code, name, price, sort_order, active, category FROM menu_items WHERE code = ? AND active = 1",
+        (old,),
+    ).fetchone()
+    if not source:
+        raise ValueError(f"Unknown active menu code: {old}")
+    if old.lower() == new.lower():
+        recase_menu_item(conn, source, new)
+        return
+    clash = find_menu_item(conn, new, exclude=old)
+    if clash and clash["active"]:
+        raise ValueError(f"Menu code {clash['code']} already exists.")
+    if clash:
+        # Dormant item from an earlier event: take over its row under the new spelling.
+        if clash["code"] != new:
+            recase_menu_item(conn, clash, new)
+        conn.execute(
+            "UPDATE menu_items SET name = ?, price = ?, sort_order = ?, category = ?, active = 1 WHERE code = ?",
+            (source["name"], source["price"], source["sort_order"], source["category"], new),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO menu_items (code, name, price, sort_order, active, category) VALUES (?, ?, ?, ?, 1, ?)",
+            (new, source["name"], source["price"], source["sort_order"], source["category"]),
+        )
+    move_menu_code(conn, old, new, active_event_id(conn))
+
+
 def save_menu_item(conn: sqlite3.Connection, data: dict, code: str | None = None) -> dict:
-    item_code = str(code or data.get("code", "")).strip().upper()
+    new_code = str(data.get("code") or code or "").strip()
     name = str(data.get("name", "")).strip()
     price = money(data.get("price"))
-    if not item_code:
+    if not new_code:
         raise ValueError("Menu code is required.")
     if not name:
         raise ValueError("Menu name is required.")
     if price < 0:
         raise ValueError("Price cannot be negative.")
+    category = data.get("category")
+    if category is not None and category not in ("food", "drink"):
+        raise ValueError("Category must be food or drink.")
+    if code is None:
+        existing = find_menu_item(conn, new_code)
+        if existing and existing["active"]:
+            raise ValueError(f"Menu code {existing['code']} already exists.")
+        if existing and existing["code"] != new_code:
+            recase_menu_item(conn, existing, new_code)
+    elif new_code != code:
+        rename_menu_item(conn, code, new_code)
+    item_code = new_code
     max_sort = conn.execute(
         "SELECT COALESCE(MAX(sort_order), 0) FROM menu_items WHERE active = 1"
     ).fetchone()[0]
     conn.execute(
         """
-        INSERT INTO menu_items (code, name, price, sort_order, active)
-        VALUES (?, ?, ?, ?, 1)
+        INSERT INTO menu_items (code, name, price, sort_order, active, category)
+        VALUES (?, ?, ?, ?, 1, ?)
         ON CONFLICT(code) DO UPDATE SET
           name = excluded.name,
           price = excluded.price,
+          category = COALESCE(?, menu_items.category),
           sort_order = CASE
             WHEN menu_items.active = 0 THEN excluded.sort_order
             ELSE menu_items.sort_order
           END,
           active = 1
         """,
-        (item_code, name, price, max_sort + 1),
+        (item_code, name, price, max_sort + 1, category or "food", category),
     )
     return dict(
         conn.execute(
-            "SELECT code, name, price, active FROM menu_items WHERE code = ?",
+            "SELECT code, name, price, active, category FROM menu_items WHERE code = ?",
             (item_code,),
         ).fetchone()
     )
@@ -1048,7 +1243,7 @@ def save_menu_item(conn: sqlite3.Connection, data: dict, code: str | None = None
 def reorder_menu_items(conn: sqlite3.Connection, codes: list[object]) -> list[dict]:
     clean_codes = []
     for code in codes:
-        item_code = str(code).strip().upper()
+        item_code = str(code).strip()
         if item_code and item_code not in clean_codes:
             clean_codes.append(item_code)
     if not clean_codes:
@@ -1117,7 +1312,7 @@ class Handler(BaseHTTPRequestHandler):
                 code, raw_quantity = raw.split(":", 1)
                 quantity = money(raw_quantity)
                 if code.strip() and quantity > 0:
-                    item_filters.append((code.strip().upper(), quantity))
+                    item_filters.append((code.strip(), quantity))
             with connect() as conn:
                 self.json(ticket_rows(conn, search, open_only, item_filters, active_event_id(conn)))
             return
@@ -1128,6 +1323,17 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/events/active":
             with connect() as conn:
                 self.json(active_event(conn))
+            return
+        if parsed.path.startswith("/api/events/") and parsed.path.endswith("/bar-export"):
+            try:
+                event_id = int(parsed.path.split("/")[3])
+                with connect() as conn:
+                    self.html(
+                        bar_report_html(conn, event_id),
+                        filename=f"mikuna-event-{event_id}-drinks.html",
+                    )
+            except (ValueError, KeyError):
+                self.error(HTTPStatus.NOT_FOUND, "Event not found")
             return
         if parsed.path.startswith("/api/events/") and parsed.path.endswith("/export"):
             try:
@@ -1252,7 +1458,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/menu/"):
-            code = parsed.path.rsplit("/", 1)[1]
+            code = unquote(parsed.path.rsplit("/", 1)[1])
             try:
                 data = self.read_json()
                 with connect() as conn:
@@ -1289,7 +1495,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/menu/"):
-            code = parsed.path.rsplit("/", 1)[1]
+            code = unquote(parsed.path.rsplit("/", 1)[1])
             with connect() as conn:
                 conn.execute("UPDATE menu_items SET active = 0 WHERE code = ?", (code,))
                 normalize_active_menu_order(conn)

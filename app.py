@@ -20,12 +20,32 @@ DB_PATH = ROOT / "mikuna.db"
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE IF NOT EXISTS venues (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    grid_cols INTEGER NOT NULL DEFAULT 12 CHECK (grid_cols > 0),
+    grid_rows INTEGER NOT NULL DEFAULT 8 CHECK (grid_rows > 0),
+    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS venue_tables (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_id INTEGER NOT NULL REFERENCES venues(id) ON DELETE CASCADE,
+    name TEXT NOT NULL COLLATE NOCASE,
+    grid_col INTEGER NOT NULL CHECK (grid_col >= 0),
+    grid_row INTEGER NOT NULL CHECK (grid_row >= 0),
+    UNIQUE (venue_id, name),
+    UNIQUE (venue_id, grid_col, grid_row)
+);
+
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     event_date TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
     menu_snapshot TEXT NOT NULL DEFAULT '[]',
+    venue_id INTEGER REFERENCES venues(id),
+    layout_snapshot TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     archived_at TEXT
 );
@@ -188,6 +208,11 @@ def current_menu_snapshot(conn: sqlite3.Connection) -> str:
 
 def ensure_event_state(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    event_columns = table_columns(conn, "events")
+    if "venue_id" not in event_columns:
+        conn.execute("ALTER TABLE events ADD COLUMN venue_id INTEGER REFERENCES venues(id)")
+    if "layout_snapshot" not in event_columns:
+        conn.execute("ALTER TABLE events ADD COLUMN layout_snapshot TEXT")
     order_columns = table_columns(conn, "orders")
     if "event_id" not in order_columns:
         conn.execute("ALTER TABLE orders ADD COLUMN event_id INTEGER")
@@ -543,10 +568,12 @@ def event_rows(conn: sqlite3.Connection) -> list[dict]:
         conn,
         """
         SELECT e.id, e.name, e.event_date, e.status, e.menu_snapshot,
+               e.venue_id, v.name AS venue_name,
                COUNT(DISTINCT o.id) AS order_count,
                ROUND(COALESCE(SUM(p.total_with_tip), 0), 2) AS total,
                ROUND(COALESCE(SUM(p.total_with_tip - p.subtotal), 0), 2) AS tips
         FROM events e
+        LEFT JOIN venues v ON v.id = e.venue_id
         LEFT JOIN orders o ON o.event_id = e.id
         LEFT JOIN payments p ON p.order_id = o.id
         GROUP BY e.id
@@ -559,7 +586,15 @@ def active_event(conn: sqlite3.Connection) -> dict | None:
     event_id = active_event_id(conn)
     if event_id is None:
         return None
-    event = conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+    event = conn.execute(
+        """
+        SELECT e.*, v.name AS venue_name
+        FROM events e
+        LEFT JOIN venues v ON v.id = e.venue_id
+        WHERE e.id = ?
+        """,
+        (event_id,),
+    ).fetchone()
     if not event:
         raise KeyError("Active event not found")
     payload = dict(event)
@@ -568,6 +603,7 @@ def active_event(conn: sqlite3.Connection) -> dict | None:
 
 
 def update_active_event(conn: sqlite3.Connection, data: dict) -> dict:
+    """Save the active event's name and date, and its venue when venue_id or venue_name is sent."""
     event_id = require_active_event_id(conn)
     name = str(data.get("name", "")).strip()
     event_date = str(data.get("event_date", "")).strip()
@@ -579,6 +615,11 @@ def update_active_event(conn: sqlite3.Connection, data: dict) -> dict:
         "UPDATE events SET name = ?, event_date = ? WHERE id = ? AND status = 'active'",
         (name, event_date, event_id),
     )
+    if "venue_id" in data or "venue_name" in data:
+        conn.execute(
+            "UPDATE events SET venue_id = ? WHERE id = ? AND status = 'active'",
+            (event_venue_id(conn, data), event_id),
+        )
     return active_event(conn)
 
 
@@ -589,9 +630,10 @@ def open_event(conn: sqlite3.Connection, data: dict) -> dict:
     event_date = str(data.get("event_date") or date.today().isoformat()).strip()
     if not name:
         raise ValueError("Event name is required.")
+    venue_id = event_venue_id(conn, data)
     cur = conn.execute(
-        "INSERT INTO events (name, event_date, status) VALUES (?, ?, 'active')",
-        (name, event_date),
+        "INSERT INTO events (name, event_date, status, venue_id) VALUES (?, ?, 'active', ?)",
+        (name, event_date, venue_id),
     )
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('active_event_id', ?)",
@@ -601,21 +643,290 @@ def open_event(conn: sqlite3.Connection, data: dict) -> dict:
 
 
 def close_active_event(conn: sqlite3.Connection) -> dict:
-    """Archive the active event and leave no event open. The menu is cleared for the next event."""
+    """Archive the active event and leave no event open. The menu is cleared for the next event.
+
+    The menu and the venue's table layout are snapshotted, so later edits don't change the past event."""
     event_id = require_active_event_id(conn)
+    venue_id = conn.execute("SELECT venue_id FROM events WHERE id = ?", (event_id,)).fetchone()["venue_id"]
     conn.execute(
         """
         UPDATE events
         SET status = 'archived',
             menu_snapshot = ?,
+            layout_snapshot = ?,
             archived_at = datetime('now', 'localtime')
         WHERE id = ?
         """,
-        (current_menu_snapshot(conn), event_id),
+        (
+            current_menu_snapshot(conn),
+            None if venue_id is None else json.dumps(venue_layout(conn, venue_id), separators=(",", ":")),
+            event_id,
+        ),
     )
     conn.execute("UPDATE menu_items SET active = 0")
     conn.execute("DELETE FROM settings WHERE key = 'active_event_id'")
     return dict(conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone())
+
+
+class VenueInUse(Exception):
+    """Raised when deleting a venue that events still reference."""
+
+
+GRID_MAX = 40
+VENUE_NAME_MAX = 60
+TABLE_NAME_MAX = 12
+
+
+def whole_number(value: object, label: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a whole number.")
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be a whole number.") from None
+
+
+def grid_size(value: object, label: str) -> int:
+    size = whole_number(value, label)
+    if not 1 <= size <= GRID_MAX:
+        raise ValueError(f"{label} must be between 1 and {GRID_MAX}.")
+    return size
+
+
+def find_venue(conn: sqlite3.Connection, venue_id: int) -> sqlite3.Row:
+    venue = conn.execute("SELECT * FROM venues WHERE id = ?", (venue_id,)).fetchone()
+    if not venue:
+        raise KeyError("Venue not found")
+    return venue
+
+
+def clean_venue_name(conn: sqlite3.Connection, value: object, venue_id: int | None = None) -> str:
+    name = " ".join(str(value or "").split())
+    if not name:
+        raise ValueError("Venue name is required.")
+    if len(name) > VENUE_NAME_MAX:
+        raise ValueError(f"Venue name can be at most {VENUE_NAME_MAX} characters.")
+    clash = conn.execute(
+        "SELECT name FROM venues WHERE name = ? COLLATE NOCASE AND id IS NOT ?",
+        (name, venue_id),
+    ).fetchone()
+    if clash:
+        raise ValueError(f"A venue called {clash['name']} already exists.")
+    return name
+
+
+def venue_rows(conn: sqlite3.Connection) -> list[dict]:
+    return [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "cols": row["grid_cols"],
+            "rows": row["grid_rows"],
+            "table_count": row["table_count"],
+            "event_count": row["event_count"],
+        }
+        for row in conn.execute(
+            """
+            SELECT v.id, v.name, v.grid_cols, v.grid_rows,
+                   (SELECT COUNT(*) FROM venue_tables t WHERE t.venue_id = v.id) AS table_count,
+                   (SELECT COUNT(*) FROM events e WHERE e.venue_id = v.id) AS event_count
+            FROM venues v
+            ORDER BY v.name COLLATE NOCASE
+            """
+        ).fetchall()
+    ]
+
+
+def venue_layout(conn: sqlite3.Connection, venue_id: int) -> dict:
+    """A venue's grid and tables. This shape is also what events store as layout_snapshot."""
+    venue = find_venue(conn, venue_id)
+    tables = [
+        {"id": row["id"], "name": row["name"], "col": row["grid_col"], "row": row["grid_row"]}
+        for row in conn.execute(
+            """
+            SELECT id, name, grid_col, grid_row
+            FROM venue_tables
+            WHERE venue_id = ?
+            ORDER BY grid_row, grid_col
+            """,
+            (venue_id,),
+        ).fetchall()
+    ]
+    return {
+        "id": venue["id"],
+        "name": venue["name"],
+        "cols": venue["grid_cols"],
+        "rows": venue["grid_rows"],
+        "tables": tables,
+    }
+
+
+def venue_payload(conn: sqlite3.Connection, venue_id: int) -> dict:
+    payload = venue_layout(conn, venue_id)
+    payload["event_count"] = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE venue_id = ?", (venue_id,)
+    ).fetchone()[0]
+    return payload
+
+
+def create_venue(conn: sqlite3.Connection, data: dict) -> dict:
+    name = clean_venue_name(conn, data.get("name"))
+    cols = grid_size(data.get("cols", 12), "Columns")
+    grid_rows = grid_size(data.get("rows", 8), "Rows")
+    cur = conn.execute(
+        "INSERT INTO venues (name, grid_cols, grid_rows) VALUES (?, ?, ?)",
+        (name, cols, grid_rows),
+    )
+    return venue_payload(conn, int(cur.lastrowid))
+
+
+def update_venue(conn: sqlite3.Connection, venue_id: int, data: dict) -> dict:
+    """Rename and/or resize a venue. A grid can't shrink past a table."""
+    venue = find_venue(conn, venue_id)
+    name = clean_venue_name(conn, data["name"], venue_id) if "name" in data else venue["name"]
+    cols = grid_size(data["cols"], "Columns") if "cols" in data else venue["grid_cols"]
+    grid_rows = grid_size(data["rows"], "Rows") if "rows" in data else venue["grid_rows"]
+    outside = [
+        row["name"]
+        for row in conn.execute(
+            """
+            SELECT name FROM venue_tables
+            WHERE venue_id = ? AND (grid_col >= ? OR grid_row >= ?)
+            ORDER BY grid_row, grid_col
+            """,
+            (venue_id, cols, grid_rows),
+        ).fetchall()
+    ]
+    if outside:
+        listed = ", ".join(outside[:5]) + (f" and {len(outside) - 5} more" if len(outside) > 5 else "")
+        raise ValueError(
+            f"Can't make the grid {cols} × {grid_rows}: "
+            f"{'table' if len(outside) == 1 else 'tables'} {listed} would fall outside it. "
+            f"Move or remove {'it' if len(outside) == 1 else 'them'} first."
+        )
+    conn.execute(
+        "UPDATE venues SET name = ?, grid_cols = ?, grid_rows = ? WHERE id = ?",
+        (name, cols, grid_rows, venue_id),
+    )
+    return venue_payload(conn, venue_id)
+
+
+def delete_venue(conn: sqlite3.Connection, venue_id: int) -> None:
+    venue = find_venue(conn, venue_id)
+    events = conn.execute(
+        "SELECT name, event_date FROM events WHERE venue_id = ? ORDER BY event_date DESC, id DESC",
+        (venue_id,),
+    ).fetchall()
+    if events:
+        listed = ", ".join(f"{row['name']} ({row['event_date']})" for row in events[:3])
+        if len(events) > 3:
+            listed += f" and {len(events) - 3} more"
+        raise VenueInUse(
+            f"{venue['name']} can't be deleted: "
+            f"{'1 event uses' if len(events) == 1 else f'{len(events)} events use'} it ({listed})."
+        )
+    conn.execute("DELETE FROM venues WHERE id = ?", (venue_id,))
+
+
+def event_venue_id(conn: sqlite3.Connection, data: dict) -> int | None:
+    """The venue an event form picked: venue_name (an existing venue, or a new one is created),
+    else venue_id, else None for no venue."""
+    venue_name = " ".join(str(data.get("venue_name") or "").split())
+    if venue_name:
+        existing = conn.execute(
+            "SELECT id FROM venues WHERE name = ? COLLATE NOCASE", (venue_name,)
+        ).fetchone()
+        if existing:
+            return int(existing["id"])
+        return int(create_venue(conn, {"name": venue_name})["id"])
+    if data.get("venue_id") in (None, ""):
+        return None
+    venue_id = whole_number(data["venue_id"], "Venue")
+    try:
+        find_venue(conn, venue_id)
+    except KeyError:
+        raise ValueError("Venue not found.") from None
+    return venue_id
+
+
+def clean_table_name(
+    conn: sqlite3.Connection, venue_id: int, value: object, table_id: int | None = None
+) -> str:
+    name = " ".join(str(value or "").split())
+    if not name:
+        raise ValueError("Table name is required.")
+    if len(name) > TABLE_NAME_MAX:
+        raise ValueError(f"Table name can be at most {TABLE_NAME_MAX} characters.")
+    clash = conn.execute(
+        "SELECT name FROM venue_tables WHERE venue_id = ? AND name = ? COLLATE NOCASE AND id IS NOT ?",
+        (venue_id, name, table_id),
+    ).fetchone()
+    if clash:
+        raise ValueError(f"There is already a table {clash['name']} here.")
+    return name
+
+
+def table_cell(
+    conn: sqlite3.Connection, venue: sqlite3.Row, data: dict, table_id: int | None = None
+) -> tuple[int, int]:
+    col = whole_number(data.get("col"), "Column")
+    row = whole_number(data.get("row"), "Row")
+    if not (0 <= col < venue["grid_cols"] and 0 <= row < venue["grid_rows"]):
+        raise ValueError("That square is outside the grid.")
+    taken = conn.execute(
+        "SELECT name FROM venue_tables WHERE venue_id = ? AND grid_col = ? AND grid_row = ? AND id IS NOT ?",
+        (venue["id"], col, row, table_id),
+    ).fetchone()
+    if taken:
+        raise ValueError(f"Table {taken['name']} is already on that square.")
+    return col, row
+
+
+def find_venue_table(conn: sqlite3.Connection, venue_id: int, table_id: int) -> sqlite3.Row:
+    table = conn.execute(
+        "SELECT * FROM venue_tables WHERE id = ? AND venue_id = ?", (table_id, venue_id)
+    ).fetchone()
+    if not table:
+        raise KeyError("Table not found")
+    return table
+
+
+def add_venue_table(conn: sqlite3.Connection, venue_id: int, data: dict) -> dict:
+    venue = find_venue(conn, venue_id)
+    name = clean_table_name(conn, venue_id, data.get("name"))
+    col, row = table_cell(conn, venue, data)
+    conn.execute(
+        "INSERT INTO venue_tables (venue_id, name, grid_col, grid_row) VALUES (?, ?, ?, ?)",
+        (venue_id, name, col, row),
+    )
+    return venue_payload(conn, venue_id)
+
+
+def update_venue_table(conn: sqlite3.Connection, venue_id: int, table_id: int, data: dict) -> dict:
+    """Rename and/or move a table. Its id stays the same."""
+    venue = find_venue(conn, venue_id)
+    table = find_venue_table(conn, venue_id, table_id)
+    name = clean_table_name(conn, venue_id, data["name"], table_id) if "name" in data else table["name"]
+    if "col" in data or "row" in data:
+        col, row = table_cell(
+            conn,
+            venue,
+            {"col": data.get("col", table["grid_col"]), "row": data.get("row", table["grid_row"])},
+            table_id,
+        )
+    else:
+        col, row = table["grid_col"], table["grid_row"]
+    conn.execute(
+        "UPDATE venue_tables SET name = ?, grid_col = ?, grid_row = ? WHERE id = ?",
+        (name, col, row, table_id),
+    )
+    return venue_payload(conn, venue_id)
+
+
+def delete_venue_table(conn: sqlite3.Connection, venue_id: int, table_id: int) -> dict:
+    find_venue_table(conn, venue_id, table_id)
+    conn.execute("DELETE FROM venue_tables WHERE id = ?", (table_id,))
+    return venue_payload(conn, venue_id)
 
 
 def esc(value: object) -> str:
@@ -1498,6 +1809,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if self.is_venue_path(parsed.path):
+            self.venue_api("GET", parsed.path)
+            return
         if parsed.path == "/api/menu":
             with connect() as conn:
                 self.json(active_menu(conn))
@@ -1596,6 +1910,9 @@ class Handler(BaseHTTPRequestHandler):
     @reports_event_conflicts
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if self.is_venue_path(parsed.path):
+            self.venue_api("POST", parsed.path)
+            return
         if parsed.path == "/api/menu/reorder":
             try:
                 data = self.read_json()
@@ -1680,6 +1997,9 @@ class Handler(BaseHTTPRequestHandler):
     @reports_event_conflicts
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
+        if self.is_venue_path(parsed.path):
+            self.venue_api("PUT", parsed.path)
+            return
         if parsed.path.startswith("/api/menu/"):
             code = unquote(parsed.path.rsplit("/", 1)[1])
             try:
@@ -1718,6 +2038,9 @@ class Handler(BaseHTTPRequestHandler):
     @reports_event_conflicts
     def do_DELETE(self) -> None:
         parsed = urlparse(self.path)
+        if self.is_venue_path(parsed.path):
+            self.venue_api("DELETE", parsed.path)
+            return
         if parsed.path.startswith("/api/menu/"):
             code = unquote(parsed.path.rsplit("/", 1)[1])
             with connect() as conn:
@@ -1751,6 +2074,57 @@ class Handler(BaseHTTPRequestHandler):
             self.json({"ok": True})
             return
         self.error(HTTPStatus.NOT_FOUND, "Not found")
+
+    @staticmethod
+    def is_venue_path(path: str) -> bool:
+        return path == "/api/venues" or path.startswith("/api/venues/")
+
+    def venue_api(self, method: str, path: str) -> None:
+        """Venues and their table layouts:
+
+        GET /api/venues, POST /api/venues {name, cols?, rows?},
+        GET/PUT/DELETE /api/venues/<id> (PUT {name?, cols?, rows?}),
+        POST /api/venues/<id>/tables {name, col, row},
+        PUT/DELETE /api/venues/<id>/tables/<table id> (PUT {name?, col?, row?}).
+        Table writes return the whole venue so the editor can redraw from one response."""
+        parts = path.strip("/").split("/")[2:]
+        try:
+            if len(parts) > 3 or (len(parts) >= 2 and parts[1] != "tables"):
+                raise ValueError
+            venue_id = int(parts[0]) if parts else None
+            table_id = int(parts[2]) if len(parts) == 3 else None
+        except ValueError:
+            self.error(HTTPStatus.NOT_FOUND, "Not found")
+            return
+        routes = {
+            (0, "GET"): lambda conn, data: venue_rows(conn),
+            (0, "POST"): lambda conn, data: create_venue(conn, data),
+            (1, "GET"): lambda conn, data: venue_payload(conn, venue_id),
+            (1, "PUT"): lambda conn, data: update_venue(conn, venue_id, data),
+            (1, "DELETE"): lambda conn, data: delete_venue(conn, venue_id) or {"ok": True},
+            (2, "POST"): lambda conn, data: add_venue_table(conn, venue_id, data),
+            (3, "PUT"): lambda conn, data: update_venue_table(conn, venue_id, table_id, data),
+            (3, "DELETE"): lambda conn, data: delete_venue_table(conn, venue_id, table_id),
+        }
+        route = routes.get((len(parts), method))
+        if route is None:
+            self.error(HTTPStatus.NOT_FOUND, "Not found")
+            return
+        status = HTTPStatus.CREATED if method == "POST" else HTTPStatus.OK
+        try:
+            data = self.read_json() if method in ("POST", "PUT") else {}
+            if not isinstance(data, dict):
+                raise ValueError("Expected a JSON object.")
+            with connect() as conn:
+                result = route(conn, data)
+                conn.commit()
+                self.json(result, status)
+        except KeyError as exc:
+            self.error(HTTPStatus.NOT_FOUND, exc.args[0] if exc.args else "Not found")
+        except VenueInUse as exc:
+            self.error(HTTPStatus.CONFLICT, str(exc))
+        except ValueError as exc:
+            self.error(HTTPStatus.BAD_REQUEST, str(exc))
 
     def static(self, request_path: str) -> None:
         path = STATIC / "index.html" if request_path in ("", "/") else STATIC / request_path.lstrip("/")

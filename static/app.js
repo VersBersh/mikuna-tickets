@@ -16,6 +16,16 @@ const state = {
   openedQuantities: {},
   // The open event, or null when none is active (ordering is then disabled).
   activeEvent: null,
+  // All events, newest first (for the default venue), and all venues.
+  events: [],
+  venues: [],
+  // Layout tab: the venue being edited, its grid and tables, and the square being edited inline.
+  layoutVenueId: null,
+  layout: null,
+  layoutEdit: null,
+  layoutNameMode: null,
+  layoutSave: null,
+  layoutPendingWrites: 0,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -28,6 +38,9 @@ const fmtQty = (value) => {
     ? String(rounded)
     : rounded.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
 };
+const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => (
+  { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]
+));
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -84,6 +97,14 @@ async function switchView(view) {
   $$(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
   $$(".view").forEach((panel) => panel.classList.toggle("active", panel.id === `view-${view}`));
   renderTicketTabs();
+  if (view === "layout" && activeView !== "layout") {
+    try {
+      await loadVenues();
+      await showLayout();
+    } catch (error) {
+      showLayoutMessage(error.message);
+    }
+  }
 }
 
 function setTableLocked(locked) {
@@ -1446,6 +1467,10 @@ function today() {
 
 function applyActiveEvent(active) {
   const hadEvent = Boolean(state.activeEvent);
+  // The Layout tab follows the active event's venue when that changes.
+  if ((active?.venue_id ?? null) !== (state.activeEvent?.venue_id ?? null) && active?.venue_id) {
+    state.layoutVenueId = active.venue_id;
+  }
   state.activeEvent = active;
   const hasEvent = Boolean(active);
   $("#activeEventForm").classList.toggle("hidden", !hasEvent);
@@ -1469,13 +1494,21 @@ function applyActiveEvent(active) {
 }
 
 async function renderEvents() {
-  applyActiveEvent(await api("/api/events/active"));
-  const events = (await api("/api/events")).filter((event) => event.status === "archived");
+  const [active, allEvents, venues] = await Promise.all([
+    api("/api/events/active"),
+    api("/api/events"),
+    api("/api/venues"),
+  ]);
+  state.events = allEvents;
+  state.venues = venues;
+  applyActiveEvent(active);
+  renderEventVenuePickers();
+  const events = allEvents.filter((event) => event.status === "archived");
   $("#eventList").innerHTML = events.length ? events.map((event) => `
       <div class="event-row">
         <div>
           <strong>${event.name} · ${event.event_date}</strong>
-          <span>${event.status} · ${event.order_count} tickets · ${fmt(event.total)} total · ${fmt(event.tips)} tips</span>
+          <span>${event.status}${event.venue_name ? ` · ${escapeHtml(event.venue_name)}` : ""} · ${event.order_count} tickets · ${fmt(event.total)} total · ${fmt(event.tips)} tips</span>
         </div>
         <div class="row-actions">
           <button data-bar-export="${event.id}" type="button">Drinks for bar</button>
@@ -1503,16 +1536,71 @@ function openFoodExport(event) {
   if (id) window.open(`/api/events/${id}/food-export`, "_blank");
 }
 
+// The venue of the most recent event that has one: the default for a new event.
+function recentVenueId() {
+  const ids = new Set(state.venues.map((venue) => venue.id));
+  return state.events.find((event) => event.venue_id && ids.has(event.venue_id))?.venue_id ?? null;
+}
+
+function venueOptionsHtml() {
+  return [
+    `<option value="">No venue</option>`,
+    ...state.venues.map((venue) => `<option value="${venue.id}">${escapeHtml(venue.name)}</option>`),
+    `<option value="new">New venue…</option>`,
+  ].join("");
+}
+
+function setVenuePicker(select, nameInput, value) {
+  select.innerHTML = venueOptionsHtml();
+  const known = value === "new" || value === "" || state.venues.some((venue) => String(venue.id) === String(value));
+  select.value = known ? String(value) : "";
+  nameInput.classList.toggle("hidden", select.value !== "new");
+}
+
+function renderEventVenuePickers() {
+  const newSelect = $("#newEventVenue");
+  // Keep what the user picked in the open-event form; otherwise default to the most recent venue.
+  const newValue = newSelect.dataset.touched ? newSelect.value : (recentVenueId() ?? "");
+  setVenuePicker(newSelect, $("#newEventVenueName"), newValue);
+  const activeSelect = $("#activeEventVenue");
+  const activeValue = activeSelect.value === "new" ? "new" : (state.activeEvent?.venue_id ?? "");
+  setVenuePicker(activeSelect, $("#activeEventVenueName"), activeValue);
+}
+
+function onVenuePickerChange(select, nameInput) {
+  select.dataset.touched = "1";
+  const isNew = select.value === "new";
+  nameInput.classList.toggle("hidden", !isNew);
+  clearFieldInvalid(nameInput);
+  if (isNew) nameInput.focus();
+}
+
+// {venue_id} or {venue_name} for an event request; null when "New venue…" has no name yet.
+function venueChoice(select, nameInput) {
+  if (select.value !== "new") return { venue_id: select.value ? Number(select.value) : null };
+  const venueName = nameInput.value.trim();
+  if (!venueName) {
+    markFieldInvalid(nameInput, "Type a name for the new venue, or pick one from the list.");
+    return null;
+  }
+  return { venue_name: venueName };
+}
+
 async function saveActiveEvent() {
+  const venue = venueChoice($("#activeEventVenue"), $("#activeEventVenueName"));
+  if (!venue) return;
   try {
     const event = await api("/api/events/active", {
       method: "POST",
       body: JSON.stringify({
         name: $("#activeEventName").value,
         event_date: $("#activeEventDate").value,
+        ...venue,
       }),
     });
-    setStatus(`Saved event ${event.name}`);
+    $("#activeEventVenue").value = "";
+    $("#activeEventVenueName").value = "";
+    setStatus(`Saved event ${event.name}${event.venue_name ? ` at ${event.venue_name}` : ""}`);
     await refreshAll();
   } catch (error) {
     setStatus(error.message);
@@ -1526,12 +1614,16 @@ async function closeEvent() {
     setStatus("Name and date are required before closing the event.");
     return;
   }
+  const venue = venueChoice($("#activeEventVenue"), $("#activeEventVenueName"));
+  if (!venue) return;
   if (!confirm(`Close "${name}"? Ordering stops until you open a new event.`)) return;
   try {
     await api("/api/events/active", {
       method: "POST",
-      body: JSON.stringify({ name, event_date: eventDate }),
+      body: JSON.stringify({ name, event_date: eventDate, ...venue }),
     });
+    $("#activeEventVenue").value = "";
+    $("#activeEventVenueName").value = "";
     await api("/api/events/close", { method: "POST" });
     state.currentTicket = null;
     state.openTickets = [];
@@ -1553,17 +1645,417 @@ async function openEvent() {
     return;
   }
   if (!dateInput.value) dateInput.value = today();
+  const venue = venueChoice($("#newEventVenue"), $("#newEventVenueName"));
+  if (!venue) return;
   try {
     const event = await api("/api/events/open", {
       method: "POST",
-      body: JSON.stringify({ name, event_date: dateInput.value }),
+      body: JSON.stringify({ name, event_date: dateInput.value, ...venue }),
     });
     nameInput.value = "";
+    $("#newEventVenueName").value = "";
+    delete $("#newEventVenue").dataset.touched;
     clearOrder();
     await refreshAll();
     setStatus(`Opened ${event.name}`);
   } catch (error) {
     setStatus(error.message);
+  }
+}
+
+async function loadVenues() {
+  state.venues = await api("/api/venues");
+  renderEventVenuePickers();
+}
+
+function showLayoutMessage(text) {
+  const box = $("#layoutMessage");
+  box.textContent = text || "";
+  box.classList.toggle("hidden", !text);
+  if (text) setStatus(text);
+}
+
+// Open a venue in the Layout tab: the one asked for, else the last one shown, the active event's,
+// the most recent event's, or the first.
+async function showLayout(venueId = state.layoutVenueId) {
+  const ids = state.venues.map((venue) => venue.id);
+  const id = [venueId, state.activeEvent?.venue_id, recentVenueId(), ids[0]]
+    .find((candidate) => candidate && ids.includes(candidate)) ?? null;
+  state.layoutVenueId = id;
+  state.layoutEdit = null;
+  state.layout = id ? await api(`/api/venues/${id}`) : null;
+  renderLayout();
+}
+
+function renderLayout() {
+  const layout = state.layout;
+  const hasVenue = Boolean(layout);
+  $("#layoutVenue").innerHTML = state.venues.map((venue) => `
+    <option value="${venue.id}">${escapeHtml(venue.name)} (${venue.table_count} ${venue.table_count === 1 ? "table" : "tables"})</option>
+  `).join("");
+  if (hasVenue) $("#layoutVenue").value = String(layout.id);
+  $$("#layoutToolbar .venue-pick, #renameVenue, #deleteVenue, #layoutToolbar .layout-size, #layoutHelp, #layoutGridWrap")
+    .forEach((element) => element.classList.toggle("hidden", !hasVenue));
+  $("#layoutEmpty").classList.toggle("hidden", hasVenue);
+  if (!hasVenue && !state.layoutNameMode) openVenueNameForm("create", { focus: false });
+  const active = state.activeEvent;
+  $("#layoutNote").textContent = hasVenue && active?.venue_id === layout.id
+    ? `Venue of the active event, ${active.name}`
+    : "";
+  if (!hasVenue) {
+    $("#layoutGrid").innerHTML = "";
+    return;
+  }
+  $("#layoutCols").value = layout.cols;
+  $("#layoutRows").value = layout.rows;
+  renderLayoutGrid();
+}
+
+function layoutTableAt(col, row) {
+  return state.layout.tables.find((table) => table.col === col && table.row === row);
+}
+
+function renderLayoutGrid() {
+  const layout = state.layout;
+  const grid = $("#layoutGrid");
+  const focused = document.activeElement?.classList.contains("cell-input");
+  grid.style.setProperty("--cols", layout.cols);
+  grid.style.setProperty("--rows", layout.rows);
+  const edit = state.layoutEdit;
+  const cells = [];
+  for (let row = 0; row < layout.rows; row += 1) {
+    for (let col = 0; col < layout.cols; col += 1) {
+      const table = layoutTableAt(col, row);
+      const where = `column ${col + 1}, row ${row + 1}`;
+      if (edit && edit.col === col && edit.row === row) {
+        cells.push(`
+          <div class="layout-cell editing ${edit.tableId ? "table" : ""}">
+            <input class="cell-input" value="${escapeHtml(edit.value)}" maxlength="12" autocomplete="off"
+              aria-label="${edit.tableId ? "Table name" : "New table name"}, ${where}. Enter saves, Escape cancels.">
+            ${edit.tableId ? `<button class="cell-remove" type="button" title="Remove table" aria-label="Remove table">&times;</button>` : ""}
+          </div>
+        `);
+      } else if (table) {
+        cells.push(`
+          <button class="layout-cell table ${table.id ? "" : "pending"}" type="button" data-table-id="${table.id ?? ""}"
+            data-col="${col}" data-row="${row}" title="${escapeHtml(table.name)}: click to rename or remove, drag to move"
+            aria-label="Table ${escapeHtml(table.name)}, ${where}">${escapeHtml(table.name)}</button>
+        `);
+      } else {
+        cells.push(`
+          <button class="layout-cell" type="button" data-col="${col}" data-row="${row}" aria-label="Add a table at ${where}"></button>
+        `);
+      }
+    }
+  }
+  // Replacing a focused input fires blur in some browsers; that must not save a half-typed name.
+  state.layoutRendering = true;
+  grid.innerHTML = cells.join("");
+  state.layoutRendering = false;
+  const input = $(".cell-input", grid);
+  if (!input) return;
+  input.addEventListener("input", () => {
+    state.layoutEdit.value = input.value;
+    showLayoutMessage("");
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitLayoutEdit();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      cancelLayoutEdit();
+    }
+  });
+  input.addEventListener("blur", () => {
+    if (!state.layoutRendering) commitLayoutEdit({ fromBlur: true });
+  });
+  const remove = $(".cell-remove", grid);
+  if (remove) {
+    // Keep focus in the input so pressing remove doesn't first save a rename.
+    remove.addEventListener("pointerdown", (event) => event.preventDefault());
+    remove.addEventListener("click", () => removeLayoutTable(state.layoutEdit.tableId));
+  }
+  if (focused || edit.focus) {
+    edit.focus = false;
+    input.focus();
+    if (edit.select) {
+      edit.select = false;
+      input.select();
+    }
+  }
+}
+
+// The highest numeric table name + 1, so numbered tables can be added with a click and Enter.
+function nextTableName() {
+  const numbers = state.layout.tables
+    .map((table) => String(table.name).trim())
+    .filter((name) => /^\d+$/.test(name))
+    .map(Number);
+  return String(numbers.length ? Math.max(...numbers) + 1 : 1);
+}
+
+function startLayoutEdit(col, row) {
+  if (state.layoutEdit) {
+    if (state.layoutEdit.col === col && state.layoutEdit.row === row) return;
+    // Clicking elsewhere saves the square being edited first.
+    commitLayoutEdit({ fromBlur: true });
+  }
+  const table = layoutTableAt(col, row);
+  if (table && !table.id) return;
+  showLayoutMessage("");
+  state.layoutEdit = {
+    col,
+    row,
+    tableId: table?.id ?? null,
+    value: table ? table.name : nextTableName(),
+    original: table?.name ?? null,
+    focus: true,
+    select: true,
+  };
+  renderLayoutGrid();
+}
+
+function cancelLayoutEdit() {
+  state.layoutEdit = null;
+  renderLayoutGrid();
+}
+
+function commitLayoutEdit({ fromBlur = false } = {}) {
+  const edit = state.layoutEdit;
+  if (!edit || edit.committing) return;
+  const name = edit.value.trim();
+  if (!name || name === edit.original) {
+    cancelLayoutEdit();
+    return;
+  }
+  const clash = state.layout.tables.find((table) => (
+    table.id !== edit.tableId && table.name.trim().toLowerCase() === name.toLowerCase()
+  ));
+  if (clash) {
+    showLayoutMessage(`There is already a table ${clash.name} here.`);
+    // Leaving the square drops the edit; staying in it lets the name be fixed.
+    if (fromBlur) cancelLayoutEdit();
+    else $(".cell-input")?.select();
+    return;
+  }
+  edit.committing = true;
+  state.layoutEdit = null;
+  if (edit.tableId) {
+    const table = state.layout.tables.find((item) => item.id === edit.tableId);
+    if (table) table.name = name;
+    renderLayoutGrid();
+    queueLayoutWrite(`/api/venues/${state.layout.id}/tables/${edit.tableId}`, "PUT", { name }, `Renamed table to ${name}`);
+  } else {
+    state.layout.tables.push({ id: null, name, col: edit.col, row: edit.row });
+    renderLayoutGrid();
+    queueLayoutWrite(
+      `/api/venues/${state.layout.id}/tables`,
+      "POST",
+      { name, col: edit.col, row: edit.row },
+      `Added table ${name}`,
+    );
+  }
+}
+
+function removeLayoutTable(tableId) {
+  const table = state.layout.tables.find((item) => item.id === tableId);
+  if (!table) return;
+  state.layoutEdit = null;
+  state.layout.tables = state.layout.tables.filter((item) => item.id !== tableId);
+  renderLayoutGrid();
+  queueLayoutWrite(`/api/venues/${state.layout.id}/tables/${tableId}`, "DELETE", null, `Removed table ${table.name}`);
+}
+
+function moveLayoutTable(tableId, col, row) {
+  const table = state.layout.tables.find((item) => item.id === tableId);
+  if (!table || layoutTableAt(col, row)) return;
+  table.col = col;
+  table.row = row;
+  renderLayoutGrid();
+  queueLayoutWrite(`/api/venues/${state.layout.id}/tables/${tableId}`, "PUT", { col, row }, `Moved table ${table.name}`);
+}
+
+// Table changes show at once and are saved in order. Each response carries the whole venue,
+// which replaces the local copy once nothing else is waiting.
+function queueLayoutWrite(path, method, body, doneMessage) {
+  const venueId = state.layout.id;
+  state.layoutPendingWrites += 1;
+  state.layoutSave = (state.layoutSave || Promise.resolve()).then(async () => {
+    let venue = null;
+    let failed = null;
+    try {
+      venue = await api(path, { method, ...(body ? { body: JSON.stringify(body) } : {}) });
+    } catch (error) {
+      failed = error;
+    }
+    state.layoutPendingWrites -= 1;
+    if (state.layout?.id !== venueId) return;
+    if (failed) {
+      showLayoutMessage(failed.message);
+      // Undo the local change: reload the venue as the server has it.
+      venue = await api(`/api/venues/${venueId}`).catch(() => null);
+    } else {
+      setStatus(doneMessage);
+    }
+    if (venue && state.layoutPendingWrites === 0) {
+      state.layout = venue;
+      const summary = state.venues.find((item) => item.id === venueId);
+      if (summary) summary.table_count = venue.tables.length;
+      if (state.layoutEdit && layoutTableAt(state.layoutEdit.col, state.layoutEdit.row)?.id !== (state.layoutEdit.tableId ?? undefined)) {
+        state.layoutEdit = null;
+      }
+      renderLayoutGrid();
+    }
+  });
+  return state.layoutSave;
+}
+
+function startTableDrag(event, cell) {
+  if (event.button !== 0 || !cell.dataset.tableId) return;
+  event.preventDefault();
+  const tableId = Number(cell.dataset.tableId);
+  const startX = event.clientX;
+  const startY = event.clientY;
+  let ghost = null;
+  let target = null;
+
+  const targetAt = (x, y) => {
+    const found = document.elementFromPoint(x, y)?.closest("#layoutGrid .layout-cell");
+    return found && found !== cell ? found : null;
+  };
+  const move = (moveEvent) => {
+    if (!ghost) {
+      if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) < 6) return;
+      const box = cell.getBoundingClientRect();
+      ghost = cell.cloneNode(true);
+      ghost.classList.add("drag-ghost");
+      ghost.style.width = `${box.width}px`;
+      ghost.style.height = `${box.height}px`;
+      document.body.appendChild(ghost);
+      cell.classList.add("drag-source");
+      $("#layoutGrid").classList.add("dragging");
+    }
+    ghost.style.left = `${moveEvent.clientX}px`;
+    ghost.style.top = `${moveEvent.clientY}px`;
+    const next = targetAt(moveEvent.clientX, moveEvent.clientY);
+    if (next !== target) {
+      target?.classList.remove("drop-ok", "drop-no");
+      target = next;
+      target?.classList.add(target.classList.contains("table") ? "drop-no" : "drop-ok");
+    }
+  };
+  const end = (endEvent) => {
+    document.removeEventListener("pointermove", move);
+    document.removeEventListener("pointerup", end);
+    document.removeEventListener("pointercancel", end);
+    if (!ghost) {
+      // No drag: a plain click opens the table for renaming.
+      if (endEvent.type === "pointerup") startLayoutEdit(Number(cell.dataset.col), Number(cell.dataset.row));
+      return;
+    }
+    ghost.remove();
+    cell.classList.remove("drag-source");
+    $("#layoutGrid").classList.remove("dragging");
+    target?.classList.remove("drop-ok", "drop-no");
+    if (endEvent.type !== "pointerup" || !target) return;
+    if (target.classList.contains("table")) {
+      showLayoutMessage("That square already has a table. Drop it on an empty square.");
+      return;
+    }
+    moveLayoutTable(tableId, Number(target.dataset.col), Number(target.dataset.row));
+  };
+  document.addEventListener("pointermove", move);
+  document.addEventListener("pointerup", end);
+  document.addEventListener("pointercancel", end);
+}
+
+function resizeLayout() {
+  // Queued behind table changes; reads the inputs when its turn comes, so repeats are no-ops.
+  state.layoutSave = (state.layoutSave || Promise.resolve()).then(async () => {
+    const layout = state.layout;
+    if (!layout) return;
+    const cols = Number($("#layoutCols").value);
+    const rows = Number($("#layoutRows").value);
+    if (cols === layout.cols && rows === layout.rows) return;
+    try {
+      const venue = await api(`/api/venues/${layout.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ cols, rows }),
+      });
+      if (state.layout?.id !== venue.id) return;
+      state.layout = venue;
+      state.layoutEdit = null;
+      showLayoutMessage("");
+      setStatus(`Grid is now ${venue.cols} × ${venue.rows}`);
+      renderLayout();
+    } catch (error) {
+      $("#layoutCols").value = layout.cols;
+      $("#layoutRows").value = layout.rows;
+      showLayoutMessage(error.message);
+    }
+  });
+}
+
+function openVenueNameForm(mode, { focus = true } = {}) {
+  state.layoutNameMode = mode;
+  const rename = mode === "rename";
+  $("#venueNameLabel").textContent = rename ? "Venue name" : "New venue name";
+  $("#saveVenueName").textContent = rename ? "Rename" : "Create";
+  $("#cancelVenueName").classList.toggle("hidden", !state.layout);
+  const input = $("#venueNameInput");
+  input.value = rename ? state.layout.name : "";
+  clearFieldInvalid(input);
+  $("#venueNameForm").classList.remove("hidden");
+  if (focus) {
+    input.focus();
+    input.select();
+  }
+}
+
+function closeVenueNameForm() {
+  state.layoutNameMode = null;
+  $("#venueNameForm").classList.add("hidden");
+}
+
+async function saveVenueName() {
+  const input = $("#venueNameInput");
+  const name = input.value.trim();
+  if (!name) {
+    markFieldInvalid(input, "Venue name is required.");
+    return;
+  }
+  const rename = state.layoutNameMode === "rename" && state.layout;
+  try {
+    const venue = rename
+      ? await api(`/api/venues/${state.layout.id}`, { method: "PUT", body: JSON.stringify({ name }) })
+      : await api("/api/venues", { method: "POST", body: JSON.stringify({ name }) });
+    closeVenueNameForm();
+    showLayoutMessage("");
+    await loadVenues();
+    await showLayout(venue.id);
+    setStatus(rename ? `Renamed venue to ${venue.name}` : `Created venue ${venue.name}`);
+    if (state.activeEvent?.venue_id === venue.id) await renderEvents();
+  } catch (error) {
+    markFieldInvalid(input, error.message);
+  }
+}
+
+async function deleteVenue() {
+  const layout = state.layout;
+  if (!layout) return;
+  const count = layout.tables.length;
+  // A venue that events use can't be deleted; the server says which events, so skip the question.
+  if (!layout.event_count && !confirm(`Delete venue ${layout.name}${count ? ` and its ${count} ${count === 1 ? "table" : "tables"}` : ""}?`)) return;
+  try {
+    await api(`/api/venues/${layout.id}`, { method: "DELETE" });
+    showLayoutMessage("");
+    state.layoutVenueId = null;
+    await loadVenues();
+    await showLayout(null);
+    setStatus(`Deleted venue ${layout.name}`);
+  } catch (error) {
+    showLayoutMessage(error.message);
   }
 }
 
@@ -1655,5 +2147,67 @@ $("#newEventName").addEventListener("keydown", (event) => {
 $("#goToEvents").addEventListener("click", () => switchView("events"));
 $("#barExportActive").addEventListener("click", openBarExport);
 $("#foodExportActive").addEventListener("click", openFoodExport);
+$("#newEventVenue").addEventListener("change", () => onVenuePickerChange($("#newEventVenue"), $("#newEventVenueName")));
+$("#newEventVenueName").addEventListener("input", () => clearFieldInvalid($("#newEventVenueName")));
+$("#newEventVenueName").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") openEvent();
+});
+$("#activeEventVenue").addEventListener("change", () => {
+  onVenuePickerChange($("#activeEventVenue"), $("#activeEventVenueName"));
+  if ($("#activeEventVenue").value !== "new") saveActiveEvent();
+});
+$("#activeEventVenueName").addEventListener("input", () => clearFieldInvalid($("#activeEventVenueName")));
+$("#activeEventVenueName").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") saveActiveEvent();
+});
+
+$("#layoutVenue").addEventListener("change", async () => {
+  closeVenueNameForm();
+  showLayoutMessage("");
+  try {
+    await showLayout(Number($("#layoutVenue").value));
+  } catch (error) {
+    showLayoutMessage(error.message);
+  }
+});
+$("#newVenue").addEventListener("click", () => openVenueNameForm("create"));
+$("#renameVenue").addEventListener("click", () => openVenueNameForm("rename"));
+$("#deleteVenue").addEventListener("click", deleteVenue);
+$("#saveVenueName").addEventListener("click", saveVenueName);
+$("#cancelVenueName").addEventListener("click", closeVenueNameForm);
+$("#venueNameInput").addEventListener("input", () => clearFieldInvalid($("#venueNameInput")));
+$("#venueNameInput").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") saveVenueName();
+  else if (event.key === "Escape" && state.layout) closeVenueNameForm();
+});
+// change also fires on Enter.
+$("#layoutCols").addEventListener("change", resizeLayout);
+$("#layoutRows").addEventListener("change", resizeLayout);
+// Pointer clicks are handled on pointerup, so a drag and a click on a table can be told apart.
+$("#layoutGrid").addEventListener("pointerdown", (event) => {
+  const cell = event.target.closest(".layout-cell[data-col]");
+  state.layoutPointerCell = null;
+  if (!cell) return;
+  if (cell.classList.contains("table")) {
+    startTableDrag(event, cell);
+  } else if (event.button === 0) {
+    // Keep focus in a square being edited until this click has been handled.
+    event.preventDefault();
+    state.layoutPointerCell = `${cell.dataset.col},${cell.dataset.row}`;
+  }
+});
+$("#layoutGrid").addEventListener("pointerup", (event) => {
+  const cell = event.target.closest(".layout-cell[data-col]:not(.table)");
+  const key = state.layoutPointerCell;
+  state.layoutPointerCell = null;
+  if (!cell || key !== `${cell.dataset.col},${cell.dataset.row}`) return;
+  startLayoutEdit(Number(cell.dataset.col), Number(cell.dataset.row));
+});
+$("#layoutGrid").addEventListener("click", (event) => {
+  // Keyboard activation (Enter or Space on a square) has no pointer events.
+  if (event.detail !== 0) return;
+  const cell = event.target.closest(".layout-cell[data-col]");
+  if (cell) startLayoutEdit(Number(cell.dataset.col), Number(cell.dataset.row));
+});
 
 start().catch((error) => setStatus(error.message));

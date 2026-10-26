@@ -1,6 +1,6 @@
 # Mikuna Tickets
 
-Small local ticketing app for Mikuna pop-up events. It runs as a single Python process, stores data in SQLite, and uses a browser UI for order entry, split payments, open-ticket search, menu setup, seating chart, totals, and past events.
+Small local ticketing app for Mikuna pop-up events. It runs as a single Python process, stores data in SQLite, and uses a browser UI for order entry, split payments, open-ticket search, menu setup, venue table layouts, totals, and past events.
 
 ## Requirements
 
@@ -26,11 +26,12 @@ The app creates `mikuna.db` automatically on first run. That file is your local 
 
 ## Event Setup
 
-1. Open the `Menu` tab.
-2. Add today’s menu codes, item names, and prices.
-3. Use the `Order` tab to create tickets.
-4. Use `Open Tickets` to search, pay, edit, or delete active tickets.
-5. Use `Totals` for sales and cash tracking.
+1. Open an event on the `Events` tab, optionally at a venue. Lay out a venue's tables on the `Layout` tab.
+2. Open the `Menu` tab.
+3. Add today’s menu codes, item names, and prices.
+4. Use the `Order` tab to create tickets.
+5. Use `Open Tickets` to search, pay, edit, or delete active tickets.
+6. Use `Totals` for sales and cash tracking.
 
 Item filters in `Open Tickets` are minimum matches. For example, `CV = 1` finds any open ticket with at least one `CV`; combining `CV = 1` and `DS = 1` finds tickets that have both.
 

@@ -969,7 +969,18 @@ input[readonly] {
 }
 
 .event-form {
-  grid-template-columns: minmax(180px, 1fr) 150px auto auto;
+  grid-template-columns: minmax(160px, 1fr) 145px minmax(130px, 200px) auto;
+}
+
+.event-form button {
+  white-space: nowrap;
+}
+
+.event-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .no-event {
@@ -1185,19 +1196,217 @@ input[readonly] {
   margin-bottom: 12px;
 }
 
-.floorplan-wrap {
-  width: 100%;
-  overflow: auto;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius);
-  background: #fff;
+.layout-surface {
+  max-width: 1000px;
 }
 
-.floorplan-wrap img {
-  display: block;
+.layout-note {
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.layout-toolbar,
+.layout-name-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px 16px;
+  margin-bottom: 12px;
+}
+
+.layout-toolbar .venue-pick {
+  min-width: 200px;
+  flex: 0 1 280px;
+}
+
+.layout-venue-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.layout-size {
+  display: flex;
+  align-items: end;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.layout-size input {
+  width: 76px;
+}
+
+.layout-times {
+  color: var(--muted);
+  padding-bottom: 8px;
+}
+
+.layout-name-form {
+  border: 1px solid var(--filter-line);
+  border-radius: var(--radius);
+  background: var(--filter-tint);
+  padding: 10px 12px;
+}
+
+.layout-name-form .field {
+  flex: 0 1 320px;
+}
+
+.layout-message {
+  margin-bottom: 12px;
+  border-radius: 6px;
+  background: #fdecec;
+  color: var(--danger);
+  font-weight: 600;
+  padding: 8px 12px;
+}
+
+.layout-help {
+  margin: 0 0 10px;
+}
+
+.layout-grid-wrap {
+  overflow-x: auto;
+  padding: 2px;
+}
+
+.layout-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 12), minmax(40px, 1fr));
+  gap: 4px;
+  /* Squares up to 68px, smaller when needed so the whole grid fits the screen height. */
+  max-width: min(
+    calc(var(--cols, 12) * 68px),
+    calc((100vh - 330px) * var(--cols, 12) / var(--rows, 8))
+  );
+  user-select: none;
+}
+
+.layout-cell {
+  position: relative;
+  aspect-ratio: 1;
+  min-width: 0;
+  min-height: 0;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--muted);
+  padding: 2px;
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.1;
+}
+
+.layout-cell:not(.table):not(.editing):hover::after {
+  content: "+";
+  color: var(--accent);
+  font-size: 20px;
+}
+
+.layout-cell:not(.table):not(.editing):hover {
+  border-color: var(--accent);
+  background: #eff6fc;
+}
+
+.layout-cell.table {
+  border: 1px solid #8fbbe6;
+  background: var(--filter-tint);
+  color: #0f476f;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+  cursor: grab;
+  touch-action: none;
+}
+
+.layout-cell.table:hover {
+  border-color: var(--accent);
+  background: #dcebf9;
+}
+
+.layout-cell.table.pending {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.layout-cell:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.layout-cell.editing {
+  display: grid;
+  border: 2px solid var(--accent);
+  background: var(--surface);
+  padding: 0;
+  overflow: visible;
+}
+
+.layout-cell .cell-input {
   width: 100%;
-  min-width: 760px;
-  height: auto;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  border: 0;
+  border-radius: 4px;
+  padding: 2px;
+  text-align: center;
+  font-weight: 650;
+}
+
+.layout-cell .cell-input:focus {
+  box-shadow: none;
+}
+
+.layout-cell .cell-remove {
+  position: absolute;
+  top: -9px;
+  right: -9px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  min-height: 22px;
+  height: 22px;
+  border: 1px solid var(--danger);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--danger);
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.layout-cell .cell-remove:hover {
+  background: #fdecec;
+}
+
+.layout-grid.dragging,
+.layout-grid.dragging * {
+  cursor: grabbing;
+}
+
+.layout-cell.drag-source {
+  opacity: 0.35;
+}
+
+.layout-cell.drop-ok {
+  border: 2px solid var(--accent);
+  background: #dcebf9;
+}
+
+.layout-cell.drop-no {
+  border-color: var(--danger);
+  background: #fdecec;
+}
+
+.drag-ghost {
+  position: fixed;
+  z-index: 10;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  box-shadow: var(--shadow);
+  opacity: 0.9;
 }
 
 .empty {
@@ -1287,5 +1496,9 @@ input[readonly] {
 
   .final-split-actions {
     justify-content: flex-start;
+  }
+
+  .layout-size {
+    margin-left: 0;
   }
 }

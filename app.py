@@ -576,7 +576,7 @@ def esc(value: object) -> str:
 
 
 def currency(value: object) -> str:
-    return f"${money(value):.2f}"
+    return f"\u20ac{money(value):.2f}"
 
 
 def event_report_html(conn: sqlite3.Connection, event_id: int) -> str:

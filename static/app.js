@@ -19,7 +19,7 @@ const state = {
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const money = (value) => Number(value || 0);
-const fmt = (value) => `$${money(value).toFixed(2)}`;
+const fmt = (value) => `\u20ac${money(value).toFixed(2)}`;
 const fmtQty = (value) => {
   const rounded = Math.round(money(value) * 100) / 100;
   return Number.isInteger(rounded)

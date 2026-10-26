@@ -26,6 +26,13 @@ const state = {
   layoutNameMode: null,
   layoutSave: null,
   layoutPendingWrites: 0,
+  // Tickets tab: the active event's venue layout and open tickets ({event_id, venue, open}).
+  board: null,
+  boardRequest: 0,
+  // The venue table a new ticket is being started for (null: free-text table or person).
+  draftTableId: null,
+  // Whether the table picker (move a ticket, or pick a draft's table) is showing.
+  pickerOpen: false,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -48,7 +55,13 @@ async function api(path, options = {}) {
     ...options,
   });
   const body = await response.json();
-  if (!response.ok) throw new Error(body.error || "Request failed");
+  if (!response.ok) {
+    const error = new Error(body?.error || "Request failed");
+    // A busy table answers 409 with the open ticket's order_id.
+    error.status = response.status;
+    error.body = body;
+    throw error;
+  }
   return body;
 }
 
@@ -79,24 +92,29 @@ function selectInputValue(event) {
   window.setTimeout(() => input.select(), 0);
 }
 
-async function switchView(view) {
-  const activeView = $(".view.active")?.id.replace("view-", "");
-  if (view === "order" && state.currentTicket) {
-    const saved = await flushAutosave();
-    if (!saved) return;
-  }
-  if (activeView === "order" && view !== "order") {
-    const saved = await flushAutosave();
-    if (!saved) return;
-  }
-  if (view === "order") {
-    state.currentTicket = null;
-    clearOrder({ keepTicketTabs: true });
-  }
-  if (view === "tickets" && activeView !== "tickets") clearTicketFilters();
-  $$(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
+function currentView() {
+  return $(".view.active")?.id.replace("view-", "");
+}
+
+// Show a view. The order view (one ticket) has no tab of its own: ticket tabs stand in for it.
+function showView(view) {
+  $$(".tab[data-view]").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
   $$(".view").forEach((panel) => panel.classList.toggle("active", panel.id === `view-${view}`));
   renderTicketTabs();
+}
+
+// Save the ticket being worked on before leaving it. False when that failed (stay put).
+async function leaveOrderView() {
+  if (currentView() !== "order") return true;
+  closeTablePicker();
+  return flushAutosave();
+}
+
+async function switchView(view) {
+  const activeView = currentView();
+  if (view !== "order" && !(await leaveOrderView())) return;
+  if (view === "tickets" && activeView !== "tickets") clearTicketFilters();
+  showView(view);
   if (view === "layout" && activeView !== "layout") {
     try {
       await loadVenues();
@@ -142,8 +160,11 @@ async function checkTableClash() {
 
 async function openClashingTicket() {
   const id = Number($("#tableClash").dataset.ticketId);
-  if (!id) return;
-  // Carry anything already picked on this new order over to the existing ticket.
+  if (id) await openTicketWithDraft(id);
+}
+
+// Open an existing ticket in place of the new order, carrying anything already picked over to it.
+async function openTicketWithDraft(id) {
   const draft = Object.entries(state.quantities).filter(([, quantity]) => quantity > 0);
   clearOrder();
   await openTicketTab(id);
@@ -158,6 +179,7 @@ async function openClashingTicket() {
 
 function editTable() {
   setTableLocked(false);
+  if (boardTables().length) openTablePicker();
   const input = $("#tableNo");
   input.focus();
   input.select();
@@ -242,6 +264,10 @@ function closeTicketTab(ticketId) {
   if (state.currentTicket?.id === Number(ticketId)) {
     state.currentTicket = null;
     clearOrder({ keepTicketTabs: true });
+    if (currentView() === "order") {
+      showView("tickets");
+      renderTickets().catch((error) => setStatus(error.message));
+    }
   } else {
     renderTicketTabs();
   }
@@ -951,6 +977,7 @@ function savedPaymentSubtotal(paymentId) {
 function orderPayload() {
   return {
     table_no: $("#tableNo").value.trim(),
+    venue_table_id: state.draftTableId,
     note: $("#orderNote").value.trim(),
     items: activeItems().map((item) => ({ menu_code: item.code, quantity: item.quantity })),
     payments: state.currentTicket ? paymentPayloads() : [],
@@ -1039,6 +1066,14 @@ async function saveCurrentWork(
     await refreshAll();
     return true;
   } catch (error) {
+    if (!state.currentTicket && error.status === 409 && error.body?.order_id) {
+      // The table already has an open ticket (one per table): open that one, with these items added.
+      state.autosaveInFlight = false;
+      await openTicketWithDraft(Number(error.body.order_id));
+      setStatus(`${error.message.split(".")[0]}, so this order went on ticket #${error.body.order_id}.`);
+      await refreshAll();
+      return false;
+    }
     setStatus(error.message);
     return false;
   } finally {
@@ -1067,14 +1102,17 @@ async function savePaymentPayloads(payments, currentTicket) {
 
 async function saveAction() {
   if (!validateTicketForSave()) return;
-  await saveCurrentWork({ clearAfter: true, autosave: false });
+  const saved = await saveCurrentWork({ clearAfter: true, autosave: false });
+  // A saved new order goes back to the tables; a busy table opened its ticket instead.
+  if (saved && !state.currentTicket) await switchView("tickets");
 }
 
-function clearOrderAction() {
+async function clearOrderAction() {
   if (hasClearableNewOrderDraft() && !confirm("Clear this new order?")) {
     return;
   }
   clearOrder();
+  await switchView("tickets");
 }
 
 async function flushAutosave() {
@@ -1090,6 +1128,8 @@ function clearOrder() {
   state.ticketMode = "edit";
   state.ticketModeId = null;
   state.dirty = false;
+  state.draftTableId = null;
+  closeTablePicker();
   state.quantities = {};
   state.menu.forEach((item) => { state.quantities[item.code] = 0; });
   clearFieldInvalid($("#tableNo"));
@@ -1108,6 +1148,7 @@ function clearOrder() {
 function loadTicketIntoForm(ticket) {
   const freshOpen = state.ticketModeId !== ticket.id;
   if (freshOpen) {
+    closeTablePicker();
     state.ticketMode = "edit";
     state.ticketModeId = ticket.id;
     state.openedQuantities = Object.fromEntries(ticket.items.map((item) => [item.menu_code, money(item.quantity)]));
@@ -1145,42 +1186,182 @@ async function openTicketTab(id) {
   upsertTicketTab(ticket);
   state.ticketModeId = null; // every open is a fresh visit: Edit mode, and earlier additions folded in
   loadTicketIntoForm(ticket);
-  $$(".view").forEach((panel) => panel.classList.toggle("active", panel.id === "view-order"));
-  $$(".tab[data-view]").forEach((tab) => tab.classList.remove("active"));
-  renderTicketTabs();
+  showView("order");
 }
 
 function tableLabel(tableNo) {
   return /^\d+$/.test(String(tableNo).trim()) ? `Table ${String(tableNo).trim()}` : tableNo;
 }
 
-async function renderTickets() {
-  if (!state.activeEvent) {
-    $("#ticketList").innerHTML = `<div class="empty">No active event. Open one on the Events tab.</div>`;
+// Start a new ticket: at a venue table (tableId and its name), or with a free-text table or person.
+async function startNewTicket({ tableId = null, name = "" } = {}) {
+  if (!(await leaveOrderView())) return;
+  clearOrder();
+  state.draftTableId = tableId;
+  $("#tableNo").value = name;
+  setTableLocked(Boolean(name));
+  showView("order");
+  window.scrollTo({ top: 0 });
+  if (name) {
+    checkTableClash();
+    $("#menuSearch").focus();
+    setStatus(`New ticket for ${tableLabel(name)}`);
+  } else {
+    $("#tableNo").focus();
+  }
+}
+
+function startLabelledTicket() {
+  const input = $("#boardNewName");
+  const name = input.value.trim();
+  input.value = "";
+  startNewTicket({ name });
+}
+
+// Visible tables of the active event's venue; none without a venue.
+function boardTables() {
+  return state.board?.venue?.tables || [];
+}
+
+function openTicketAtTable(tableId) {
+  return state.board?.open.find((ticket) => ticket.table_ids.includes(tableId)) || null;
+}
+
+async function openBoardTable(tableId) {
+  const open = openTicketAtTable(tableId);
+  if (open) {
+    await openTicketTab(open.id);
     return;
   }
+  const table = boardTables().find((item) => item.id === tableId);
+  if (table) await startNewTicket({ tableId, name: table.name });
+}
+
+function tableAt(layout, col, row) {
+  return layout.tables.find((table) => table.col === col && table.row === row);
+}
+
+// A venue's squares, row by row: cell(col, row, table or undefined) gives each square's HTML.
+// Shared by the Layout editor, the Tickets grid and the table picker.
+function layoutGridHtml(grid, layout, cell) {
+  grid.style.setProperty("--cols", layout.cols);
+  grid.style.setProperty("--rows", layout.rows);
+  const cells = [];
+  for (let row = 0; row < layout.rows; row += 1) {
+    for (let col = 0; col < layout.cols; col += 1) {
+      cells.push(cell(col, row, tableAt(layout, col, row)));
+    }
+  }
+  return cells.join("");
+}
+
+// Read-only grid squares for the Tickets tab and the picker: tables with an open ticket are
+// highlighted with the amount due; with a search, matching tables are marked and the rest dimmed.
+function boardGridHtml(grid, { matches = null, currentTableId = null, picking = false } = {}) {
+  const layout = state.board.venue;
+  grid.classList.toggle("searching", Boolean(matches));
+  return layoutGridHtml(grid, layout, (col, row, table) => {
+    if (!table) return `<div class="layout-cell blank" aria-hidden="true"></div>`;
+    const open = openTicketAtTable(table.id);
+    const current = table.id === currentTableId;
+    const classes = [
+      "layout-cell", "table", "board-table",
+      open ? "busy" : "",
+      matches?.has(table.id) ? "match" : "",
+      current ? "current" : "",
+    ].filter(Boolean).join(" ");
+    const label = escapeHtml(tableLabel(table.name));
+    const what = current
+      ? "this ticket's table"
+      : open
+        ? `${fmt(open.outstanding)} due${picking ? ", has an open ticket" : ""}`
+        : picking ? "free: move here" : "free: start a ticket";
+    return `
+      <button class="${classes}" type="button" data-board-table="${table.id}" title="${label}: ${what}" aria-label="${label}, ${what}">
+        <strong>${escapeHtml(table.name)}</strong>${open ? `<span>${fmt(open.outstanding)}</span>` : ""}
+      </button>
+    `;
+  });
+}
+
+function ticketQueryString() {
   const q = encodeURIComponent($("#ticketSearch").value.trim());
-  const open = $("#openOnly").checked ? "1" : "0";
   const itemFilters = Object.entries(state.ticketFilters)
     .filter(([, quantity]) => quantity > 0)
-    .map(([code, quantity]) => `item=${encodeURIComponent(`${code}:${quantity}`)}`)
-    .join("&");
-  const filterQuery = itemFilters ? `&${itemFilters}` : "";
-  const tickets = await api(`/api/tickets?q=${q}&open=${open}${filterQuery}`);
-  $("#ticketList").innerHTML = tickets.length ? tickets.map((ticket) => `
-    <div class="ticket-row ${ticket.outstanding <= 0.009 ? "settled" : "open-ticket"}">
-      <div>
-        <strong>${tableLabel(ticket.table_no)}</strong>
-        <span class="due">${ticket.outstanding <= 0.009 ? "Settled" : `${fmt(ticket.outstanding)} due`}</span>
+    .map(([code, quantity]) => `item=${encodeURIComponent(`${code}:${quantity}`)}`);
+  return { query: [`q=${q}`, ...itemFilters].join("&"), searching: Boolean(q) || itemFilters.length > 0 };
+}
+
+async function renderTickets() {
+  const request = ++state.boardRequest;
+  const hasEvent = Boolean(state.activeEvent);
+  $("#ticketsBoard").classList.toggle("hidden", !hasEvent);
+  if (!hasEvent) {
+    state.board = null;
+    return;
+  }
+  const { query, searching } = ticketQueryString();
+  const [board, matches, paid] = await Promise.all([
+    api("/api/tickets/board"),
+    searching ? api(`/api/tickets?${query}&open=1`) : null,
+    api(`/api/tickets?${query}&open=paid`),
+  ]);
+  // Typing fires a request per key; only the latest one draws.
+  if (request !== state.boardRequest) return;
+  state.board = board;
+  if (!board) return;
+  renderBoard(searching ? new Set(matches.flatMap((ticket) => ticket.table_ids)) : null);
+  const openTickets = searching ? matches : board.open;
+  const due = board.open.reduce((sum, ticket) => sum + money(ticket.outstanding), 0);
+  $("#boardNote").textContent = board.open.length
+    ? `${board.open.length} open · ${fmt(due)} due`
+    : "No open tickets";
+  $("#openListTitle").textContent = searching ? `Open tickets matching (${openTickets.length})` : `Open tickets (${openTickets.length})`;
+  $("#paidListTitle").textContent = searching ? `Paid tickets matching (${paid.length})` : `Paid tickets (${paid.length})`;
+  renderTicketRows($("#ticketList"), openTickets, searching ? "No open tickets match." : "No open tickets.");
+  renderTicketRows($("#paidList"), paid, searching ? "No paid tickets match." : "No paid tickets yet.");
+  if (state.pickerOpen) renderTablePicker();
+}
+
+function renderBoard(matches) {
+  const venue = state.board.venue;
+  const hasGrid = boardTables().length > 0;
+  $("#boardGridWrap").classList.toggle("hidden", !hasGrid);
+  $("#boardHelp").classList.toggle("hidden", !hasGrid);
+  $("#boardHint").classList.toggle("hidden", hasGrid);
+  $("#boardHintText").textContent = venue
+    ? `${venue.name} has no tables yet, so tickets go by table or name below.`
+    : "This event has no venue, so tickets go by table or name below. Pick a venue to click tables instead.";
+  $("[data-goto='events']", $("#boardHint")).classList.toggle("hidden", Boolean(venue));
+  $("#boardNewLabel").textContent = hasGrid ? "Ticket without table" : "New ticket: table or person";
+  $("#boardNewName").placeholder = hasGrid ? "Bar, takeaway, Sarah" : "I2, O8, Sarah";
+  $("#boardNewTicket").textContent = hasGrid ? "Ticket without table" : "Start ticket";
+  const grid = $("#boardGrid");
+  grid.innerHTML = hasGrid ? boardGridHtml(grid, { matches }) : "";
+}
+
+function renderTicketRows(root, tickets, emptyText) {
+  const onGrid = new Set(boardTables().map((table) => table.id));
+  root.innerHTML = tickets.length ? tickets.map((ticket) => {
+    const settled = ticket.outstanding <= 0.009;
+    const noTable = onGrid.size > 0 && !ticket.table_ids.some((id) => onGrid.has(id));
+    return `
+      <div class="ticket-row ${settled ? "settled" : "open-ticket"}">
+        <div>
+          <strong>${escapeHtml(tableLabel(ticket.table_no))}</strong>
+          <span class="due">${settled ? "Settled" : `${fmt(ticket.outstanding)} due`}</span>
+          ${noTable && !settled ? `<span class="tag">No table</span>` : ""}
+          <small>#${ticket.id}${ticket.note ? ` · ${escapeHtml(ticket.note)}` : ""}</small>
+        </div>
+        <div class="row-actions">
+          <button data-open-ticket="${ticket.id}" type="button">Open</button>
+          <button class="danger" data-delete="${ticket.id}" type="button">Delete</button>
+        </div>
       </div>
-      <div class="row-actions">
-        <button data-open-ticket="${ticket.id}" type="button">Open</button>
-        <button class="danger" data-delete="${ticket.id}" type="button">Delete</button>
-      </div>
-    </div>
-  `).join("") : `<div class="empty">No matching tickets</div>`;
-  $$("[data-open-ticket]").forEach((button) => button.addEventListener("click", () => openTicketTab(button.dataset.openTicket)));
-  $$("[data-delete]").forEach((button) => {
+    `;
+  }).join("") : `<div class="empty">${emptyText}</div>`;
+  $$("[data-open-ticket]", root).forEach((button) => button.addEventListener("click", () => openTicketTab(button.dataset.openTicket)));
+  $$("[data-delete]", root).forEach((button) => {
     button.addEventListener("click", async () => {
       if (!confirm("Delete this ticket?")) return;
       await api(`/api/orders/${button.dataset.delete}`, { method: "DELETE" });
@@ -1188,6 +1369,102 @@ async function renderTickets() {
       await refreshAll();
     });
   });
+}
+
+// The table picker in the order view: move the open ticket to a free table, or pick a new
+// ticket's table. Tables with another open ticket can't be picked (no merging yet).
+function openTablePicker() {
+  state.pickerOpen = true;
+  $("#tablePicker").classList.remove("hidden");
+  showPickerMessage("");
+  renderTablePicker();
+}
+
+function closeTablePicker() {
+  state.pickerOpen = false;
+  $("#tablePicker")?.classList.add("hidden");
+}
+
+function showPickerMessage(text) {
+  const box = $("#tablePickerMessage");
+  box.textContent = text || "";
+  box.classList.toggle("hidden", !text);
+  if (text) setStatus(text);
+}
+
+function renderTablePicker() {
+  if (!boardTables().length) {
+    closeTablePicker();
+    return;
+  }
+  const ticket = state.currentTicket;
+  $("#tablePickerTitle").textContent = ticket
+    ? `Move ticket #${ticket.id} from ${tableLabel(ticket.table_no)} to:`
+    : "Pick a table";
+  const grid = $("#pickerGrid");
+  grid.innerHTML = boardGridHtml(grid, {
+    currentTableId: ticket ? ticket.tables?.[0]?.id ?? null : state.draftTableId,
+    picking: true,
+  });
+}
+
+async function pickTable(tableId) {
+  const table = boardTables().find((item) => item.id === tableId);
+  if (!table) return;
+  const ticket = state.currentTicket;
+  const currentId = ticket ? ticket.tables?.[0]?.id : state.draftTableId;
+  if (tableId === currentId) {
+    closeTablePicker();
+    $("#tableNo").value = ticket ? ticket.table_no : table.name;
+    setTableLocked(true);
+    return;
+  }
+  const busy = openTicketAtTable(tableId);
+  if (busy && busy.id !== ticket?.id) {
+    showPickerMessage(`${tableLabel(table.name)} already has an open ticket (#${busy.id}). Pick an empty table.`);
+    return;
+  }
+  if (ticket) {
+    if (!confirm(`Move this ticket from ${tableLabel(ticket.table_no)} to ${tableLabel(table.name)}?`)) return;
+    await moveCurrentTicket({ venue_table_id: tableId, table_no: table.name });
+    return;
+  }
+  state.draftTableId = tableId;
+  $("#tableNo").value = table.name;
+  clearFieldInvalid($("#tableNo"));
+  closeTablePicker();
+  setTableLocked(true);
+  checkTableClash();
+  $("#menuSearch").focus();
+}
+
+// Save the open ticket at another table (venue_table_id), or under a free-text label
+// (venue_table_id null: the server still seats it if the label names a table).
+async function moveCurrentTicket(target) {
+  const ticket = state.currentTicket;
+  if (!ticket) return;
+  stopAutosaveTimer();
+  try {
+    const moved = await api(`/api/orders/${ticket.id}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        table_no: target.table_no,
+        venue_table_id: target.venue_table_id ?? null,
+        note: $("#orderNote").value.trim(),
+        items: activeItems().map((item) => ({ menu_code: item.code, quantity: item.quantity })),
+      }),
+    });
+    state.dirty = false;
+    closeTablePicker();
+    upsertTicketTab(moved);
+    loadTicketIntoForm(moved);
+    setStatus(`Moved ticket #${moved.id} to ${tableLabel(moved.table_no)}`);
+    await refreshAll();
+  } catch (error) {
+    $("#tableNo").value = ticket.table_no;
+    if (state.pickerOpen) showPickerMessage(error.message);
+    else setStatus(error.message);
+  }
 }
 
 function renderMenuEditor() {
@@ -1478,7 +1755,10 @@ function applyActiveEvent(active) {
   $("#openEventForm").classList.toggle("hidden", hasEvent);
   $("#openEventHelp").classList.toggle("hidden", hasEvent);
   $("#orderGrid").classList.toggle("hidden", !hasEvent);
+  $("#ticketsBoard").classList.toggle("hidden", !hasEvent);
   $("#noEventNotice").classList.toggle("hidden", hasEvent);
+  // Closing the event while a ticket is open leaves nothing to show there: go back to Tickets.
+  if (!hasEvent && currentView() === "order") showView("tickets");
   $("#barExportActive").disabled = !hasEvent;
   $("#foodExportActive").disabled = !hasEvent;
   if (hasEvent) {
@@ -1603,6 +1883,8 @@ async function saveActiveEvent() {
     setStatus(`Saved event ${event.name}${event.venue_name ? ` at ${event.venue_name}` : ""}`);
     await refreshAll();
   } catch (error) {
+    // A refused venue change (tickets at its tables) puts the picker back on the event's venue.
+    if ($("#activeEventVenue").value !== "new") renderEventVenuePickers();
     setStatus(error.message);
   }
 }
@@ -1712,45 +1994,39 @@ function renderLayout() {
 }
 
 function layoutTableAt(col, row) {
-  return state.layout.tables.find((table) => table.col === col && table.row === row);
+  return tableAt(state.layout, col, row);
 }
 
 function renderLayoutGrid() {
   const layout = state.layout;
   const grid = $("#layoutGrid");
   const focused = document.activeElement?.classList.contains("cell-input");
-  grid.style.setProperty("--cols", layout.cols);
-  grid.style.setProperty("--rows", layout.rows);
   const edit = state.layoutEdit;
-  const cells = [];
-  for (let row = 0; row < layout.rows; row += 1) {
-    for (let col = 0; col < layout.cols; col += 1) {
-      const table = layoutTableAt(col, row);
-      const where = `column ${col + 1}, row ${row + 1}`;
-      if (edit && edit.col === col && edit.row === row) {
-        cells.push(`
-          <div class="layout-cell editing ${edit.tableId ? "table" : ""}">
-            <input class="cell-input" value="${escapeHtml(edit.value)}" maxlength="12" autocomplete="off"
-              aria-label="${edit.tableId ? "Table name" : "New table name"}, ${where}. Enter saves, Escape cancels.">
-            ${edit.tableId ? `<button class="cell-remove" type="button" title="Remove table" aria-label="Remove table">&times;</button>` : ""}
-          </div>
-        `);
-      } else if (table) {
-        cells.push(`
-          <button class="layout-cell table ${table.id ? "" : "pending"}" type="button" data-table-id="${table.id ?? ""}"
-            data-col="${col}" data-row="${row}" title="${escapeHtml(table.name)}: click to rename or remove, drag to move"
-            aria-label="Table ${escapeHtml(table.name)}, ${where}">${escapeHtml(table.name)}</button>
-        `);
-      } else {
-        cells.push(`
-          <button class="layout-cell" type="button" data-col="${col}" data-row="${row}" aria-label="Add a table at ${where}"></button>
-        `);
-      }
+  const cells = layoutGridHtml(grid, layout, (col, row, table) => {
+    const where = `column ${col + 1}, row ${row + 1}`;
+    if (edit && edit.col === col && edit.row === row) {
+      return `
+        <div class="layout-cell editing ${edit.tableId ? "table" : ""}">
+          <input class="cell-input" value="${escapeHtml(edit.value)}" maxlength="12" autocomplete="off"
+            aria-label="${edit.tableId ? "Table name" : "New table name"}, ${where}. Enter saves, Escape cancels.">
+          ${edit.tableId ? `<button class="cell-remove" type="button" title="Remove table" aria-label="Remove table">&times;</button>` : ""}
+        </div>
+      `;
     }
-  }
+    if (table) {
+      return `
+        <button class="layout-cell table ${table.id ? "" : "pending"}" type="button" data-table-id="${table.id ?? ""}"
+          data-col="${col}" data-row="${row}" title="${escapeHtml(table.name)}: click to rename or remove, drag to move"
+          aria-label="Table ${escapeHtml(table.name)}, ${where}">${escapeHtml(table.name)}</button>
+      `;
+    }
+    return `
+      <button class="layout-cell" type="button" data-col="${col}" data-row="${row}" aria-label="Add a table at ${where}"></button>
+    `;
+  });
   // Replacing a focused input fires blur in some browsers; that must not save a half-typed name.
   state.layoutRendering = true;
-  grid.innerHTML = cells.join("");
+  grid.innerHTML = cells;
   state.layoutRendering = false;
   const input = $(".cell-input", grid);
   if (!input) return;
@@ -2080,7 +2356,11 @@ $("#backToEdit").addEventListener("click", () => setTicketMode("edit"));
 $("#tableNo").addEventListener("input", () => {
   clearFieldInvalid($("#tableNo"));
   // An open ticket's table only changes after confirmation (see the change handler).
-  if (!state.currentTicket) markDirty();
+  if (!state.currentTicket) {
+    // Typed text replaces a table picked on the grid (the server still seats it if it names a table).
+    state.draftTableId = null;
+    markDirty();
+  }
 });
 $("#tableNo").addEventListener("change", () => {
   const ticket = state.currentTicket;
@@ -2089,8 +2369,7 @@ $("#tableNo").addEventListener("change", () => {
   const next = input.value.trim();
   if (next === ticket.table_no) return;
   if (next && confirm(`Move this ticket from ${tableLabel(ticket.table_no)} to ${tableLabel(next)}?`)) {
-    ticket.table_no = next;
-    markDirty({ schedule: true });
+    moveCurrentTicket({ table_no: next, venue_table_id: null });
   } else {
     input.value = ticket.table_no;
   }
@@ -2100,16 +2379,41 @@ $("#tableNo").addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
     // Moving focus fires change (confirmation on open tickets) and blur (locks the label).
-    if (input.value.trim()) $("#menuSearch").focus();
-  } else if (event.key === "Escape" && state.currentTicket) {
-    input.value = state.currentTicket.table_no;
+    if (input.value.trim()) {
+      closeTablePicker();
+      $("#menuSearch").focus();
+    }
+  } else if (event.key === "Escape") {
+    closeTablePicker();
+    if (state.currentTicket) input.value = state.currentTicket.table_no;
     input.blur();
   }
 });
 $("#tableNo").addEventListener("blur", () => {
+  // While the picker is open the text field stays, so a table or a typed name can be chosen.
+  if (state.pickerOpen) return;
   setTableLocked(true);
   checkTableClash();
 });
+$("#cancelTablePick").addEventListener("click", () => {
+  closeTablePicker();
+  if (state.currentTicket) $("#tableNo").value = state.currentTicket.table_no;
+  setTableLocked(true);
+});
+$("#pickerGrid").addEventListener("click", (event) => {
+  const cell = event.target.closest("[data-board-table]");
+  if (cell) pickTable(Number(cell.dataset.boardTable));
+});
+$("#boardGrid").addEventListener("click", (event) => {
+  const cell = event.target.closest("[data-board-table]");
+  if (cell) openBoardTable(Number(cell.dataset.boardTable)).catch((error) => setStatus(error.message));
+});
+$("#boardNewTicket").addEventListener("click", startLabelledTicket);
+$("#boardNewName").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") startLabelledTicket();
+});
+$("#backToBoard").addEventListener("click", () => switchView("tickets"));
+$$("[data-goto]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.goto)));
 $("#openClash").addEventListener("click", openClashingTicket);
 $("#editTable").addEventListener("click", editTable);
 $("#orderNote").addEventListener("input", () => markDirty({ schedule: Boolean(state.currentTicket) }));
@@ -2118,8 +2422,7 @@ $("#addSplit").addEventListener("click", () => {
   addSplit(true);
 });
 $("#menuSearch").addEventListener("input", filterMenuPicker);
-$("#ticketSearch").addEventListener("input", renderTickets);
-$("#openOnly").addEventListener("change", renderTickets);
+$("#ticketSearch").addEventListener("input", () => renderTickets().catch((error) => setStatus(error.message)));
 $("#clearTicketFilters").addEventListener("click", clearTicketFilters);
 $("#toggleTicketFilters").addEventListener("click", () => {
   setTicketFiltersCollapsed(!$("#filterPanel").classList.contains("collapsed"));

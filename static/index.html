@@ -15,9 +15,8 @@
     </header>
 
     <nav class="tabs" id="mainTabs" aria-label="Main views">
-      <button class="tab active" data-view="order" type="button">New Order</button>
+      <button class="tab active" data-view="tickets" type="button">Tickets</button>
       <span class="ticket-tabs" id="ticketTabs"></span>
-      <button class="tab" data-view="tickets" type="button">Open Tickets</button>
       <button class="tab" data-view="menu" type="button">Menu</button>
       <button class="tab" data-view="layout" type="button">Layout</button>
       <button class="tab" data-view="totals" type="button">Totals</button>
@@ -25,16 +24,14 @@
     </nav>
 
     <main class="content">
-      <section class="view active" id="view-order">
-        <section class="surface no-event hidden" id="noEventNotice">
-          <h2>No active event</h2>
-          <p>Please add an event before taking orders.</p>
-          <button class="accent" id="goToEvents" type="button">Go to Events</button>
-        </section>
+      <section class="view" id="view-order">
         <div class="grid order-grid" id="orderGrid">
           <section class="surface" id="ticketSurface">
             <div class="surface-title">
-              <h2 id="orderTitle">New ticket</h2>
+              <div class="pay-title">
+                <button id="backToBoard" type="button">&larr; Tables</button>
+                <h2 id="orderTitle">New ticket</h2>
+              </div>
               <div class="title-actions">
                 <button id="clearOrder" type="button">Clear</button>
                 <button class="accent" id="saveAction" type="button">Save ticket</button>
@@ -49,6 +46,17 @@
             <div id="tableLocked" class="table-locked hidden">
               <h3 id="tableLockedText"></h3>
               <button id="editTable" class="link-btn" type="button" aria-label="Change table">&#9998; Change</button>
+            </div>
+            <div id="tablePicker" class="table-picker hidden">
+              <div class="table-picker-head">
+                <strong id="tablePickerTitle">Pick a table</strong>
+                <button id="cancelTablePick" class="link-btn" type="button">Cancel</button>
+              </div>
+              <div class="layout-message hidden" id="tablePickerMessage" role="alert"></div>
+              <div class="layout-grid-wrap">
+                <div class="layout-grid board-grid" id="pickerGrid"></div>
+              </div>
+              <p class="help-text">Or type a name or note above for a ticket without a table (bar, takeaway), then press Enter.</p>
             </div>
             <div id="tableClash" class="table-clash hidden" role="status">
               <span id="tableClashText"></span>
@@ -95,28 +103,60 @@
         </div>
       </section>
 
-      <section class="view" id="view-tickets">
-        <section class="surface">
-          <div class="surface-title">
-            <h2>Find open ticket</h2>
-            <label class="check"><input id="openOnly" type="checkbox" checked> Open only</label>
-          </div>
-          <input id="ticketSearch" class="search" autocomplete="off" placeholder="Search table, note, F, vegan, tres leches">
-          <section id="filterPanel" class="filter-panel">
-            <div class="filter-panel-head">
-              <button id="toggleTicketFilters" class="filter-toggle" type="button" aria-expanded="true" aria-controls="ticketFilters">
-                <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-                <h2>Item filters</h2>
-              </button>
-              <span id="ticketFilterSummary" class="filter-summary hidden"></span>
-              <button id="clearTicketFilters" type="button">Clear filters</button>
-            </div>
-            <div id="ticketFilters" class="ticket-filters"></div>
-          </section>
-          <div id="ticketList" class="ticket-list"></div>
+      <section class="view active" id="view-tickets">
+        <section class="surface no-event hidden" id="noEventNotice">
+          <h2>No active event</h2>
+          <p>Please add an event before taking orders.</p>
+          <button class="accent" id="goToEvents" type="button">Go to Events</button>
         </section>
+        <div class="tickets-layout" id="ticketsBoard">
+          <section class="surface board-surface">
+            <div class="surface-title">
+              <h2>Tables</h2>
+              <span class="layout-note" id="boardNote"></span>
+            </div>
+            <div class="board-new">
+              <label class="field"><span id="boardNewLabel">Ticket without table</span><input id="boardNewName" autocomplete="off" placeholder="Bar, takeaway, Sarah"></label>
+              <button class="accent" id="boardNewTicket" type="button">Ticket without table</button>
+            </div>
+            <div class="board-hint hidden" id="boardHint">
+              <span id="boardHintText"></span>
+              <button class="link-btn" data-goto="layout" type="button">Lay out tables</button>
+              <button class="link-btn" data-goto="events" type="button">Pick the event's venue</button>
+            </div>
+            <div class="layout-grid-wrap" id="boardGridWrap">
+              <div class="layout-grid board-grid" id="boardGrid"></div>
+            </div>
+            <p class="help-text" id="boardHelp">Click a table to open its ticket, or to start one if it's free.</p>
+          </section>
+          <section class="surface find-surface">
+            <div class="surface-title">
+              <h2>Find ticket</h2>
+            </div>
+            <input id="ticketSearch" class="search" type="search" autocomplete="off" placeholder="Search table, note, F, vegan, tres leches">
+            <section id="filterPanel" class="filter-panel">
+              <div class="filter-panel-head">
+                <button id="toggleTicketFilters" class="filter-toggle" type="button" aria-expanded="true" aria-controls="ticketFilters">
+                  <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                  <h2>Item filters</h2>
+                </button>
+                <span id="ticketFilterSummary" class="filter-summary hidden"></span>
+                <button id="clearTicketFilters" type="button">Clear filters</button>
+              </div>
+              <div id="ticketFilters" class="ticket-filters"></div>
+            </section>
+            <div class="surface-title tight"><h2 id="openListTitle">Open tickets</h2></div>
+            <div id="ticketList" class="ticket-list"></div>
+          </section>
+          <section class="surface paid-surface">
+            <div class="surface-title">
+              <h2 id="paidListTitle">Paid tickets</h2>
+            </div>
+            <div id="paidList" class="ticket-list"></div>
+          </section>
+        </div>
       </section>
 
       <section class="view" id="view-menu">

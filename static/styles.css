@@ -1400,6 +1400,165 @@ input[readonly] {
   background: #fdecec;
 }
 
+/* Tickets tab: the table grid (read-only), search beside it, paid tickets below. */
+.tickets-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 400px);
+  align-items: start;
+  gap: 16px;
+}
+
+.tickets-layout .board-surface {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.tickets-layout .find-surface {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+
+.tickets-layout .paid-surface {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+/* The search panel is narrow: one item filter per row. */
+.find-surface .ticket-filters {
+  grid-template-columns: 1fr;
+}
+
+.board-new {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.board-new .field {
+  flex: 0 1 300px;
+}
+
+.board-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-bottom: 12px;
+  border: 1px solid var(--filter-line);
+  border-radius: var(--radius);
+  background: var(--filter-tint);
+  color: #0f476f;
+  padding: 8px 12px;
+}
+
+.board-hint span {
+  margin-right: auto;
+}
+
+.board-grid .layout-cell.blank {
+  border-color: transparent;
+  background: transparent;
+}
+
+.board-grid .layout-cell.blank:hover {
+  border-color: transparent;
+  background: transparent;
+}
+
+.board-grid .layout-cell.blank:hover::after {
+  content: none;
+}
+
+.board-grid .layout-cell.table {
+  display: grid;
+  place-content: center;
+  gap: 1px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.board-grid .layout-cell.table:hover {
+  border-color: var(--accent);
+  background: #eff6fc;
+}
+
+.board-grid .layout-cell.table span {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.board-grid .layout-cell.busy {
+  border: 2px solid #e8a33d;
+  background: #fff1dc;
+  color: var(--warn);
+}
+
+.board-grid .layout-cell.busy:hover {
+  border-color: var(--warn);
+  background: #ffe6c2;
+}
+
+.board-grid .layout-cell.current {
+  border: 2px solid var(--accent);
+  background: #dcebf9;
+  color: #0f476f;
+}
+
+.board-grid.searching .layout-cell.table:not(.match) {
+  opacity: 0.35;
+}
+
+.board-grid .layout-cell.match {
+  outline: 3px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.table-picker {
+  margin: 8px 0 12px;
+  border: 1px solid var(--filter-line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: 10px 12px;
+}
+
+.table-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.table-picker .layout-grid {
+  max-width: min(calc(var(--cols, 12) * 52px), 100%);
+}
+
+.table-picker .help-text {
+  margin: 8px 0 0;
+}
+
+.ticket-row .tag {
+  display: inline-block;
+  margin-left: 8px;
+  border-radius: 10px;
+  background: var(--filter-tint);
+  color: #0f476f;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ticket-row small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .drag-ghost {
   position: fixed;
   z-index: 10;
@@ -1422,6 +1581,17 @@ input[readonly] {
 }
 
 @media (max-width: 980px) {
+  .tickets-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .tickets-layout .board-surface,
+  .tickets-layout .find-surface,
+  .tickets-layout .paid-surface {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
   .grid.two,
   .menu-form,
   .event-form,

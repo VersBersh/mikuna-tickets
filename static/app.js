@@ -14,6 +14,8 @@ const state = {
   ticketModeId: null,
   // Quantities on the ticket when it was opened, so this visit's changes can be shown separately.
   openedQuantities: {},
+  // The open event, or null when none is active (ordering is then disabled).
+  activeEvent: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -1132,6 +1134,10 @@ function tableLabel(tableNo) {
 }
 
 async function renderTickets() {
+  if (!state.activeEvent) {
+    $("#ticketList").innerHTML = `<div class="empty">No active event. Open one on the Events tab.</div>`;
+    return;
+  }
   const q = encodeURIComponent($("#ticketSearch").value.trim());
   const open = $("#openOnly").checked ? "1" : "0";
   const itemFilters = Object.entries(state.ticketFilters)
@@ -1433,29 +1439,43 @@ async function saveSettings() {
   await renderSummary();
 }
 
+function today() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+function applyActiveEvent(active) {
+  const hadEvent = Boolean(state.activeEvent);
+  state.activeEvent = active;
+  const hasEvent = Boolean(active);
+  $("#activeEventForm").classList.toggle("hidden", !hasEvent);
+  $("#activeEventHelp").classList.toggle("hidden", !hasEvent);
+  $("#openEventForm").classList.toggle("hidden", hasEvent);
+  $("#openEventHelp").classList.toggle("hidden", hasEvent);
+  $("#orderGrid").classList.toggle("hidden", !hasEvent);
+  $("#noEventNotice").classList.toggle("hidden", hasEvent);
+  $("#barExportActive").disabled = !hasEvent;
+  $("#foodExportActive").disabled = !hasEvent;
+  if (hasEvent) {
+    $("#activeEventName").value = active.name;
+    $("#activeEventDate").value = active.event_date;
+    $("#barExportActive").dataset.barExport = active.id;
+    $("#foodExportActive").dataset.foodExport = active.id;
+  } else {
+    delete $("#barExportActive").dataset.barExport;
+    delete $("#foodExportActive").dataset.foodExport;
+    if (hadEvent || !$("#newEventDate").value) $("#newEventDate").value = today();
+  }
+}
+
 async function renderEvents() {
-  const active = await api("/api/events/active");
-  $("#activeEventName").value = active.name;
-  $("#activeEventDate").value = active.event_date;
-  $("#barExportActive").dataset.barExport = active.id;
-  $("#foodExportActive").dataset.foodExport = active.id;
+  applyActiveEvent(await api("/api/events/active"));
   const events = (await api("/api/events")).filter((event) => event.status === "archived");
-  $("#eventList").innerHTML = events.length ? events.map((event) => {
-    let menu = [];
-    try {
-      menu = JSON.parse(event.menu_snapshot || "[]");
-    } catch {
-      menu = [];
-    }
-    const menuText = menu.length
-      ? menu.map((item) => `${item.code} ${fmt(item.price)}`).join(" · ")
-      : "No menu snapshot";
-    return `
+  $("#eventList").innerHTML = events.length ? events.map((event) => `
       <div class="event-row">
         <div>
           <strong>${event.name} · ${event.event_date}</strong>
           <span>${event.status} · ${event.order_count} tickets · ${fmt(event.total)} total · ${fmt(event.tips)} tips</span>
-          <small>${menuText}</small>
         </div>
         <div class="row-actions">
           <button data-bar-export="${event.id}" type="button">Drinks for bar</button>
@@ -1463,8 +1483,7 @@ async function renderEvents() {
           <button data-export-event="${event.id}" type="button">Export</button>
         </div>
       </div>
-    `;
-  }).join("") : `<div class="empty">No past events yet</div>`;
+    `).join("") : `<div class="empty">No past events yet</div>`;
   $$("[data-export-event]").forEach((button) => {
     button.addEventListener("click", () => {
       window.open(`/api/events/${button.dataset.exportEvent}/export`, "_blank");
@@ -1507,36 +1526,57 @@ async function closeEvent() {
     setStatus("Name and date are required before closing the event.");
     return;
   }
-  if (!confirm(`Close "${name}" and start a new empty event?`)) return;
+  if (!confirm(`Close "${name}"? Ordering stops until you open a new event.`)) return;
   try {
     await api("/api/events/active", {
       method: "POST",
       body: JSON.stringify({ name, event_date: eventDate }),
     });
-    const nextDate = new Date().toISOString().slice(0, 10);
-    const next = await api("/api/events/start", {
-      method: "POST",
-      body: JSON.stringify({ name: `Mikuna ${nextDate}`, event_date: nextDate }),
-    });
+    await api("/api/events/close", { method: "POST" });
     state.currentTicket = null;
     state.openTickets = [];
     clearOrder();
     await loadMenu();
     await refreshAll();
-    setStatus(`Closed ${name}. Started ${next.name}`);
+    setStatus(`Closed ${name}. Open a new event to take orders.`);
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
+async function openEvent() {
+  const nameInput = $("#newEventName");
+  const dateInput = $("#newEventDate");
+  const name = nameInput.value.trim();
+  if (!name) {
+    markFieldInvalid(nameInput, "Event name is required.");
+    return;
+  }
+  if (!dateInput.value) dateInput.value = today();
+  try {
+    const event = await api("/api/events/open", {
+      method: "POST",
+      body: JSON.stringify({ name, event_date: dateInput.value }),
+    });
+    nameInput.value = "";
+    clearOrder();
+    await refreshAll();
+    setStatus(`Opened ${event.name}`);
   } catch (error) {
     setStatus(error.message);
   }
 }
 
 async function refreshAll() {
-  await Promise.all([renderTickets(), renderSummary(), renderEvents()]);
+  // Load the active event first: the other views depend on whether one is open.
+  await renderEvents();
+  await Promise.all([renderTickets(), renderSummary()]);
 }
 
 async function start() {
   await loadMenu();
   await refreshAll();
-  setStatus("Ready");
+  setStatus(state.activeEvent ? "Ready" : "No active event");
 }
 
 $$(".tab").forEach((tab) => tab.addEventListener("click", () => switchView(tab.dataset.view)));
@@ -1607,6 +1647,12 @@ $("#refresh").addEventListener("click", refreshAll);
 $("#saveSettings").addEventListener("click", saveSettings);
 $("#saveActiveEvent").addEventListener("click", saveActiveEvent);
 $("#closeEvent").addEventListener("click", closeEvent);
+$("#openEvent").addEventListener("click", openEvent);
+$("#newEventName").addEventListener("input", () => clearFieldInvalid($("#newEventName")));
+$("#newEventName").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") openEvent();
+});
+$("#goToEvents").addEventListener("click", () => switchView("events"));
 $("#barExportActive").addEventListener("click", openBarExport);
 $("#foodExportActive").addEventListener("click", openFoodExport);
 

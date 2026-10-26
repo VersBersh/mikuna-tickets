@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import html as html_lib
 import json
 import mimetypes
@@ -132,30 +133,44 @@ def money(value: object) -> float:
     return round(float(value), 2)
 
 
-def active_event_id(conn: sqlite3.Connection) -> int:
+class NoActiveEvent(Exception):
+    """Raised when an action needs the active event but none is open."""
+
+
+class EventAlreadyOpen(Exception):
+    """Raised when opening an event while another one is still active."""
+
+
+NO_ACTIVE_EVENT_MESSAGE = "No active event. Open an event on the Events tab first."
+
+
+def active_event_id(conn: sqlite3.Connection) -> int | None:
+    """The open event's id, or None when no event is active."""
     row = conn.execute(
         "SELECT value FROM settings WHERE key = 'active_event_id'"
     ).fetchone()
     if row:
-        return int(row["value"])
+        event = conn.execute(
+            "SELECT id FROM events WHERE id = ? AND status = 'active'", (row["value"],)
+        ).fetchone()
+        if event:
+            return int(event["id"])
     event = conn.execute(
         "SELECT id FROM events WHERE status = 'active' ORDER BY id DESC LIMIT 1"
     ).fetchone()
-    if event:
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES ('active_event_id', ?)",
-            (str(event["id"]),),
-        )
-        return int(event["id"])
-    cur = conn.execute(
-        "INSERT INTO events (name, event_date, status) VALUES (?, ?, 'active')",
-        (f"Mikuna {date.today().isoformat()}", date.today().isoformat()),
-    )
-    event_id = int(cur.lastrowid)
+    if not event:
+        return None
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('active_event_id', ?)",
-        (str(event_id),),
+        (str(event["id"]),),
     )
+    return int(event["id"])
+
+
+def require_active_event_id(conn: sqlite3.Connection) -> int:
+    event_id = active_event_id(conn)
+    if event_id is None:
+        raise NoActiveEvent(NO_ACTIVE_EVENT_MESSAGE)
     return event_id
 
 
@@ -220,14 +235,6 @@ def ensure_event_state(conn: sqlite3.Connection) -> None:
                 (archived_id,),
             )
             conn.execute("UPDATE menu_items SET active = 0")
-        cur = conn.execute(
-            "INSERT INTO events (name, event_date, status) VALUES (?, ?, 'active')",
-            (f"Mikuna {date.today().isoformat()}", date.today().isoformat()),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES ('active_event_id', ?)",
-            (str(cur.lastrowid),),
-        )
     else:
         active_event_id(conn)
 
@@ -296,7 +303,7 @@ def order_payload(conn: sqlite3.Connection, order_id: int) -> dict:
 
 def active_order_payload(conn: sqlite3.Connection, order_id: int) -> dict:
     payload = order_payload(conn, order_id)
-    if int(payload["event_id"]) != active_event_id(conn):
+    if payload["event_id"] is None or payload["event_id"] != active_event_id(conn):
         raise KeyError("Order not found")
     return payload
 
@@ -351,6 +358,8 @@ def ticket_rows(
     where_parts = []
     if event_id is None:
         event_id = active_event_id(conn)
+    if event_id is None:
+        return []
     where_parts.append("o.event_id = ?")
     params.append(event_id)
     if query:
@@ -546,8 +555,10 @@ def event_rows(conn: sqlite3.Connection) -> list[dict]:
     )
 
 
-def active_event(conn: sqlite3.Connection) -> dict:
+def active_event(conn: sqlite3.Connection) -> dict | None:
     event_id = active_event_id(conn)
+    if event_id is None:
+        return None
     event = conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
     if not event:
         raise KeyError("Active event not found")
@@ -557,7 +568,7 @@ def active_event(conn: sqlite3.Connection) -> dict:
 
 
 def update_active_event(conn: sqlite3.Connection, data: dict) -> dict:
-    event_id = active_event_id(conn)
+    event_id = require_active_event_id(conn)
     name = str(data.get("name", "")).strip()
     event_date = str(data.get("event_date", "")).strip()
     if not name:
@@ -569,6 +580,42 @@ def update_active_event(conn: sqlite3.Connection, data: dict) -> dict:
         (name, event_date, event_id),
     )
     return active_event(conn)
+
+
+def open_event(conn: sqlite3.Connection, data: dict) -> dict:
+    if active_event_id(conn) is not None:
+        raise EventAlreadyOpen("An event is already active. Close it before opening another.")
+    name = str(data.get("name", "")).strip()
+    event_date = str(data.get("event_date") or date.today().isoformat()).strip()
+    if not name:
+        raise ValueError("Event name is required.")
+    cur = conn.execute(
+        "INSERT INTO events (name, event_date, status) VALUES (?, ?, 'active')",
+        (name, event_date),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('active_event_id', ?)",
+        (str(cur.lastrowid),),
+    )
+    return active_event(conn)
+
+
+def close_active_event(conn: sqlite3.Connection) -> dict:
+    """Archive the active event and leave no event open. The menu is cleared for the next event."""
+    event_id = require_active_event_id(conn)
+    conn.execute(
+        """
+        UPDATE events
+        SET status = 'archived',
+            menu_snapshot = ?,
+            archived_at = datetime('now', 'localtime')
+        WHERE id = ?
+        """,
+        (current_menu_snapshot(conn), event_id),
+    )
+    conn.execute("UPDATE menu_items SET active = 0")
+    conn.execute("DELETE FROM settings WHERE key = 'active_event_id'")
+    return dict(conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone())
 
 
 def esc(value: object) -> str:
@@ -1005,6 +1052,7 @@ def validate_order(data: dict) -> tuple[list[dict], list[dict]]:
 
 
 def create_order(conn: sqlite3.Connection, data: dict) -> int:
+    event_id = require_active_event_id(conn)
     table_no = str(data.get("table_no", "")).strip()
     if not table_no:
         raise ValueError("Table is required.")
@@ -1019,7 +1067,7 @@ def create_order(conn: sqlite3.Connection, data: dict) -> int:
 
     cur = conn.execute(
         "INSERT INTO orders (event_id, table_no, note) VALUES (?, ?, ?)",
-        (active_event_id(conn), table_no, str(data.get("note", "")).strip()),
+        (event_id, table_no, str(data.get("note", "")).strip()),
     )
     order_id = cur.lastrowid
     for item in items:
@@ -1076,7 +1124,7 @@ def update_order(conn: sqlite3.Connection, order_id: int, data: dict) -> None:
     row = conn.execute("SELECT event_id FROM orders WHERE id = ?", (order_id,)).fetchone()
     if not row:
         raise KeyError("Order not found")
-    if int(row["event_id"]) != active_event_id(conn):
+    if row["event_id"] != require_active_event_id(conn):
         raise ValueError("Only the active event can be edited.")
     table_no = str(data.get("table_no", "")).strip()
     if not table_no:
@@ -1114,7 +1162,7 @@ def add_payments(conn: sqlite3.Connection, order_id: int, data: dict) -> None:
     row = conn.execute("SELECT event_id FROM orders WHERE id = ?", (order_id,)).fetchone()
     if not row:
         raise KeyError("Order not found")
-    if int(row["event_id"]) != active_event_id(conn):
+    if row["event_id"] != require_active_event_id(conn):
         raise ValueError("Only the active event can be edited.")
     _, payments = validate_order(
         {"items": [{"menu_code": "placeholder", "quantity": 1}], "payments": data.get("payments", [])}
@@ -1168,7 +1216,7 @@ def update_payment(conn: sqlite3.Connection, payment_id: int, data: dict) -> int
     ).fetchone()
     if not row:
         raise KeyError("Payment not found")
-    if int(row["event_id"]) != active_event_id(conn):
+    if row["event_id"] != require_active_event_id(conn):
         raise ValueError("Only the active event can be edited.")
     _, payments = validate_order(
         {"items": [{"menu_code": "placeholder", "quantity": 1}], "payments": [data]}
@@ -1228,7 +1276,7 @@ def delete_payment(conn: sqlite3.Connection, payment_id: int) -> int:
     ).fetchone()
     if not row:
         raise KeyError("Payment not found")
-    if int(row["event_id"]) != active_event_id(conn):
+    if row["event_id"] != require_active_event_id(conn):
         raise ValueError("Only the active event can be edited.")
     conn.execute("DELETE FROM payments WHERE id = ?", (payment_id,))
     return int(row["order_id"])
@@ -1289,6 +1337,11 @@ def move_menu_code(
         f"UPDATE payment_allocations SET menu_code = ? WHERE menu_code = ?{payment_scope}",
         (new, old, *scope_params),
     )
+    retire_menu_code(conn, old)
+
+
+def retire_menu_code(conn: sqlite3.Connection, old: str) -> None:
+    """Drop a menu row, keeping it inactive if any order or payment still uses it."""
     still_used = conn.execute(
         """
         SELECT 1 FROM order_items WHERE menu_code = ?
@@ -1339,7 +1392,12 @@ def rename_menu_item(conn: sqlite3.Connection, old: str, new: str) -> None:
             "INSERT INTO menu_items (code, name, price, sort_order, active, category) VALUES (?, ?, ?, ?, 1, ?)",
             (new, source["name"], source["price"], source["sort_order"], source["category"]),
         )
-    move_menu_code(conn, old, new, active_event_id(conn))
+    event_id = active_event_id(conn)
+    if event_id is None:
+        # No open event: past events keep the old code, so only retire it from the menu.
+        retire_menu_code(conn, old)
+    else:
+        move_menu_code(conn, old, new, event_id)
 
 
 def save_menu_item(conn: sqlite3.Connection, data: dict, code: str | None = None) -> dict:
@@ -1420,6 +1478,19 @@ def reorder_menu_items(conn: sqlite3.Connection, codes: list[object]) -> list[di
         next_order += 1
     normalize_active_menu_order(conn)
     return active_menu(conn)
+
+
+def reports_event_conflicts(method):
+    """Turn missing/duplicate active event errors into a 409 with the message."""
+
+    @functools.wraps(method)
+    def wrapper(self: "Handler") -> None:
+        try:
+            method(self)
+        except (NoActiveEvent, EventAlreadyOpen) as exc:
+            self.error(HTTPStatus.CONFLICT, str(exc))
+
+    return wrapper
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1522,6 +1593,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.static(parsed.path)
 
+    @reports_event_conflicts
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/menu/reorder":
@@ -1587,36 +1659,25 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self.error(HTTPStatus.BAD_REQUEST, str(exc))
             return
-        if parsed.path == "/api/events/start":
-            data = self.read_json()
+        if parsed.path == "/api/events/open":
+            try:
+                data = self.read_json()
+                with connect() as conn:
+                    event = open_event(conn, data)
+                    conn.commit()
+                    self.json(event, HTTPStatus.CREATED)
+            except ValueError as exc:
+                self.error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if parsed.path == "/api/events/close":
             with connect() as conn:
-                current_id = active_event_id(conn)
-                conn.execute(
-                    """
-                    UPDATE events
-                    SET status = 'archived',
-                        menu_snapshot = ?,
-                        archived_at = datetime('now', 'localtime')
-                    WHERE id = ?
-                    """,
-                    (current_menu_snapshot(conn), current_id),
-                )
-                name = str(data.get("name") or f"Mikuna {date.today().isoformat()}").strip()
-                event_date = str(data.get("event_date") or date.today().isoformat()).strip()
-                cur = conn.execute(
-                    "INSERT INTO events (name, event_date, status) VALUES (?, ?, 'active')",
-                    (name, event_date),
-                )
-                conn.execute("UPDATE menu_items SET active = 0")
-                conn.execute(
-                    "INSERT OR REPLACE INTO settings (key, value) VALUES ('active_event_id', ?)",
-                    (str(cur.lastrowid),),
-                )
+                event = close_active_event(conn)
                 conn.commit()
-                self.json({"id": cur.lastrowid, "name": name, "event_date": event_date})
+                self.json(event)
             return
         self.error(HTTPStatus.NOT_FOUND, "Not found")
 
+    @reports_event_conflicts
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/menu/"):
@@ -1654,6 +1715,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.error(HTTPStatus.NOT_FOUND, "Not found")
 
+    @reports_event_conflicts
     def do_DELETE(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/menu/"):
@@ -1683,7 +1745,7 @@ class Handler(BaseHTTPRequestHandler):
             with connect() as conn:
                 conn.execute(
                     "DELETE FROM orders WHERE id = ? AND event_id = ?",
-                    (order_id, active_event_id(conn)),
+                    (order_id, require_active_event_id(conn)),
                 )
                 conn.commit()
             self.json({"ok": True})

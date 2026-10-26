@@ -21,12 +21,17 @@
       <button class="tab" data-view="menu" type="button">Menu</button>
       <button class="tab hidden" data-view="seating" type="button">Seating</button>
       <button class="tab" data-view="totals" type="button">Totals</button>
-      <button class="tab" data-view="events" type="button">Past Events</button>
+      <button class="tab" data-view="events" type="button">Events</button>
     </nav>
 
     <main class="content">
       <section class="view active" id="view-order">
-        <div class="grid order-grid">
+        <section class="surface no-event hidden" id="noEventNotice">
+          <h2>No active event</h2>
+          <p>Please add an event before taking orders.</p>
+          <button class="accent" id="goToEvents" type="button">Go to Events</button>
+        </section>
+        <div class="grid order-grid" id="orderGrid">
           <section class="surface" id="ticketSurface">
             <div class="surface-title">
               <h2 id="orderTitle">New ticket</h2>
@@ -172,7 +177,13 @@
         <div class="grid two">
           <section class="surface">
             <div class="surface-title"><h2>Active event</h2></div>
-            <div class="event-form">
+            <div class="event-form hidden" id="openEventForm">
+              <label class="field"><span>Name</span><input id="newEventName" autocomplete="off" required placeholder="Mikuna at the Rad"></label>
+              <label class="field"><span>Date</span><input id="newEventDate" type="date" required></label>
+              <button class="accent" id="openEvent" type="button">Open event</button>
+            </div>
+            <p class="help-text hidden" id="openEventHelp">No event is active. Open one to start taking orders.</p>
+            <div class="event-form" id="activeEventForm">
               <label class="field"><span>Name</span><input id="activeEventName" autocomplete="off"></label>
               <label class="field"><span>Date</span><input id="activeEventDate" type="date"></label>
               <button id="saveActiveEvent" type="button">Save event</button>
@@ -180,7 +191,7 @@
               <button id="foodExportActive" type="button">Food</button>
               <button class="accent" id="closeEvent" type="button">Close event</button>
             </div>
-            <p class="help-text">Closing archives the current event and starts a fresh active event. Tickets stay in history.</p>
+            <p class="help-text" id="activeEventHelp">Closing archives the current event. Tickets stay in history. Open a new event to take orders again.</p>
           </section>
           <section class="surface">
             <div class="surface-title"><h2>Past events</h2></div>

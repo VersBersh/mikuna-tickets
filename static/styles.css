@@ -972,6 +972,18 @@ input[readonly] {
   grid-template-columns: minmax(180px, 1fr) 150px auto auto;
 }
 
+.no-event {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+  max-width: 520px;
+}
+
+.no-event p {
+  color: var(--muted);
+  margin: 0;
+}
+
 .help-text {
   color: var(--muted);
   font-size: 13px;

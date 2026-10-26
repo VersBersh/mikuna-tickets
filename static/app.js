@@ -1438,6 +1438,7 @@ async function renderEvents() {
   $("#activeEventName").value = active.name;
   $("#activeEventDate").value = active.event_date;
   $("#barExportActive").dataset.barExport = active.id;
+  $("#foodExportActive").dataset.foodExport = active.id;
   const events = (await api("/api/events")).filter((event) => event.status === "archived");
   $("#eventList").innerHTML = events.length ? events.map((event) => {
     let menu = [];
@@ -1458,6 +1459,7 @@ async function renderEvents() {
         </div>
         <div class="row-actions">
           <button data-bar-export="${event.id}" type="button">Drinks for bar</button>
+          <button data-food-export="${event.id}" type="button">Food</button>
           <button data-export-event="${event.id}" type="button">Export</button>
         </div>
       </div>
@@ -1469,11 +1471,17 @@ async function renderEvents() {
     });
   });
   $$("#eventList [data-bar-export]").forEach((button) => button.addEventListener("click", openBarExport));
+  $$("#eventList [data-food-export]").forEach((button) => button.addEventListener("click", openFoodExport));
 }
 
 function openBarExport(event) {
   const id = event.currentTarget.dataset.barExport;
   if (id) window.open(`/api/events/${id}/bar-export`, "_blank");
+}
+
+function openFoodExport(event) {
+  const id = event.currentTarget.dataset.foodExport;
+  if (id) window.open(`/api/events/${id}/food-export`, "_blank");
 }
 
 async function saveActiveEvent() {
@@ -1600,5 +1608,6 @@ $("#saveSettings").addEventListener("click", saveSettings);
 $("#saveActiveEvent").addEventListener("click", saveActiveEvent);
 $("#closeEvent").addEventListener("click", closeEvent);
 $("#barExportActive").addEventListener("click", openBarExport);
+$("#foodExportActive").addEventListener("click", openFoodExport);
 
 start().catch((error) => setStatus(error.message));

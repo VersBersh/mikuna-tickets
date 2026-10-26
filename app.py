@@ -242,7 +242,8 @@ def order_payload(conn: sqlite3.Connection, order_id: int) -> dict:
         """
         SELECT oi.id, oi.menu_code, COALESCE(NULLIF(oi.menu_name, ''), mi.name, oi.menu_code) AS name,
                oi.quantity, oi.unit_price,
-               ROUND(oi.quantity * oi.unit_price, 2) AS line_total
+               ROUND(oi.quantity * oi.unit_price, 2) AS line_total,
+               COALESCE(mi.category, 'food') AS category
         FROM order_items oi
         LEFT JOIN menu_items mi ON mi.code = oi.menu_code
         WHERE oi.order_id = ?
@@ -665,6 +666,172 @@ def event_report_html(conn: sqlite3.Connection, event_id: int) -> str:
 </html>"""
 
 
+def open_category_totals(conn: sqlite3.Connection, event_id: int, category: str) -> sqlite3.Row:
+    return conn.execute(
+        """
+        SELECT COUNT(DISTINCT o.id) AS tickets,
+               ROUND(COALESCE(SUM(oi.quantity * oi.unit_price), 0), 2) AS amount
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        LEFT JOIN menu_items mi ON mi.code = oi.menu_code
+        WHERE o.event_id = ? AND COALESCE(mi.category, 'food') = ?
+          AND o.id IN (
+            SELECT o2.id FROM orders o2
+            WHERE o2.event_id = ?
+              AND (SELECT COALESCE(SUM(quantity * unit_price), 0) FROM order_items WHERE order_id = o2.id)
+                  - (SELECT COALESCE(SUM(subtotal), 0) FROM payments WHERE order_id = o2.id) > 0.009
+          )
+        """,
+        (event_id, category, event_id),
+    ).fetchone()
+
+
+def food_report_html(conn: sqlite3.Connection, event_id: int) -> str:
+    event = conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+    if not event:
+        raise KeyError("Event not found")
+    event_data = dict(event)
+    totals = summary(conn, event_id)
+    foods = [item for item in totals["sold"] if item["category"] == "food"]
+    food_totals = totals["category_totals"]["food"]
+    open_food = open_category_totals(conn, event_id, "food")
+    tickets = []
+    for row in conn.execute("SELECT id FROM orders WHERE event_id = ? ORDER BY id", (event_id,)).fetchall():
+        ticket = order_payload(conn, int(row["id"]))
+        ticket["items"] = [item for item in ticket["items"] if item["category"] == "food"]
+        ticket["food_total"] = round(sum(item["line_total"] for item in ticket["items"]), 2)
+        ticket["tips"] = round(sum(payment["tip"] for payment in ticket["payments"]), 2)
+        # Drink-only tickets stay in the appendix when they carry a tip, so the tips add up.
+        if ticket["items"] or abs(ticket["tips"]) > 0.009:
+            tickets.append(ticket)
+    metric_rows = [
+        ("Tickets with food", sum(1 for ticket in tickets if ticket["items"])),
+        ("Food total", currency(food_totals["revenue"])),
+        ("Tips (all tickets)", currency(totals["tips"])),
+        ("Food + tips", currency(food_totals["revenue"] + totals["tips"])),
+    ]
+    metric_html = "".join(
+        f"<div><span>{esc(label)}</span><strong>{esc(value)}</strong></div>"
+        for label, value in metric_rows
+    )
+    food_rows = "".join(
+        f"""
+        <tr>
+          <td>{esc(item["code"])}</td>
+          <td>{esc(item["name"])}</td>
+          <td class="num">{esc(fmt_qty(item["quantity"]))}</td>
+          <td class="num">{currency(item["price"])}</td>
+          <td class="num">{currency(item["revenue"])}</td>
+        </tr>
+        """
+        for item in foods
+    ) or "<tr><td colspan='5'>No food sold.</td></tr>"
+    ticket_html = "".join(food_ticket_report_html(ticket) for ticket in tickets) or "<p>No tickets.</p>"
+    open_note = (
+        f"<p class='warn'>{open_food['tickets']} open "
+        f"{'ticket has' if open_food['tickets'] == 1 else 'tickets have'} "
+        f"{currency(open_food['amount'])} of food not yet paid. It is included above.</p>"
+        if open_food["tickets"]
+        else ""
+    )
+    title = f"{event_data['name']} - {event_data['event_date']}"
+    return f"""<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>{esc(title)} Food Export</title>
+    <style>
+      body {{ font-family: Segoe UI, Arial, sans-serif; color: #242424; margin: 32px; line-height: 1.4; }}
+      h1, h2, h3 {{ margin: 0 0 12px; }}
+      section {{ margin: 26px 0; }}
+      .muted {{ color: #616161; }}
+      .warn {{ color: #8a4b00; font-weight: 600; }}
+      .metrics {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 16px 0; }}
+      .metrics div {{ border: 1px solid #ddd; padding: 10px; border-radius: 6px; }}
+      .metrics span {{ display: block; color: #616161; font-size: 12px; font-weight: 600; }}
+      .metrics strong {{ display: block; font-size: 18px; margin-top: 2px; }}
+      table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+      th, td {{ border-bottom: 1px solid #e5e5e5; padding: 7px 8px; text-align: left; vertical-align: top; }}
+      th {{ background: #f5f5f5; font-size: 12px; text-transform: uppercase; color: #616161; }}
+      .num {{ text-align: right; }}
+      tfoot td {{ font-weight: 700; border-bottom: none; border-top: 2px solid #242424; }}
+      .ticket {{ break-inside: avoid; border: 1px solid #ddd; border-radius: 6px; padding: 14px; margin: 14px 0; }}
+      .ticket-head {{ display: flex; justify-content: space-between; gap: 16px; }}
+      .paid {{ color: #107c10; font-weight: 700; }}
+      .open {{ color: #8a4b00; font-weight: 700; }}
+      @media print {{ body {{ margin: 18mm; }} .ticket {{ break-inside: avoid; }} }}
+    </style>
+  </head>
+  <body>
+    <h1>{esc(event_data["name"])} - Food</h1>
+    <p class="muted">{esc(event_data["event_date"])} - {esc(event_data["status"])}</p>
+    <section>
+      <h2>Summary</h2>
+      <div class="metrics">{metric_html}</div>
+      {open_note}
+      <p class="muted">Drinks are left out. Tips are from every ticket, including drink-only tickets.</p>
+    </section>
+    <section>
+      <h2>Food Sold</h2>
+      <table>
+        <thead><tr><th>Code</th><th>Item</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Total</th></tr></thead>
+        <tbody>{food_rows}</tbody>
+        <tfoot><tr><td colspan="2">Total</td><td class="num">{esc(fmt_qty(food_totals["quantity"]))}</td><td></td><td class="num">{currency(food_totals["revenue"])}</td></tr></tfoot>
+      </table>
+    </section>
+    <section>
+      <h2>Ticket Appendix</h2>
+      {ticket_html}
+    </section>
+  </body>
+</html>"""
+
+
+def food_ticket_report_html(ticket: dict) -> str:
+    status = "paid" if money(ticket["outstanding"]) <= 0.009 else "open"
+    items = "".join(
+        f"""
+        <tr>
+          <td>{esc(item["menu_code"])}</td>
+          <td>{esc(item["name"])}</td>
+          <td>{esc(item["quantity"])}</td>
+          <td>{currency(item["unit_price"])}</td>
+          <td>{currency(item["line_total"])}</td>
+        </tr>
+        """
+        for item in ticket["items"]
+    ) or "<tr><td colspan='5'>No food on this ticket.</td></tr>"
+    tips = "".join(
+        f"""
+        <tr>
+          <td>{esc(payment["split_no"])}</td>
+          <td>{esc(payment["method"])}</td>
+          <td>{currency(payment["tip"])}</td>
+        </tr>
+        """
+        for payment in ticket["payments"]
+    ) or "<tr><td colspan='3'>No payments recorded.</td></tr>"
+    return f"""
+    <article class="ticket">
+      <div class="ticket-head">
+        <div>
+          <h3>Ticket #{esc(ticket["id"])} - {esc(ticket["table_no"])}</h3>
+          <p class="muted">{esc(ticket["created_at"])}{(" - " + esc(ticket["note"])) if ticket.get("note") else ""}</p>
+        </div>
+        <div class="{status}">Food {currency(ticket["food_total"])} - Tips {currency(ticket["tips"])}{" - open" if status == "open" else ""}</div>
+      </div>
+      <table>
+        <thead><tr><th>Code</th><th>Item</th><th>Qty</th><th>Unit</th><th>Total</th></tr></thead>
+        <tbody>{items}</tbody>
+      </table>
+      <table>
+        <thead><tr><th>Split</th><th>Method</th><th>Tip</th></tr></thead>
+        <tbody>{tips}</tbody>
+      </table>
+    </article>
+    """
+
+
 def bar_report_html(conn: sqlite3.Connection, event_id: int) -> str:
     event = conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
     if not event:
@@ -673,23 +840,7 @@ def bar_report_html(conn: sqlite3.Connection, event_id: int) -> str:
     totals = summary(conn, event_id)
     drinks = [item for item in totals["sold"] if item["category"] == "drink"]
     drink_totals = totals["category_totals"]["drink"]
-    open_drinks = conn.execute(
-        """
-        SELECT COUNT(DISTINCT o.id) AS tickets,
-               ROUND(COALESCE(SUM(oi.quantity * oi.unit_price), 0), 2) AS amount
-        FROM order_items oi
-        JOIN orders o ON o.id = oi.order_id
-        LEFT JOIN menu_items mi ON mi.code = oi.menu_code
-        WHERE o.event_id = ? AND COALESCE(mi.category, 'food') = 'drink'
-          AND o.id IN (
-            SELECT o2.id FROM orders o2
-            WHERE o2.event_id = ?
-              AND (SELECT COALESCE(SUM(quantity * unit_price), 0) FROM order_items WHERE order_id = o2.id)
-                  - (SELECT COALESCE(SUM(subtotal), 0) FROM payments WHERE order_id = o2.id) > 0.009
-          )
-        """,
-        (event_id, event_id),
-    ).fetchone()
+    open_drinks = open_category_totals(conn, event_id, "drink")
     drink_rows = "".join(
         f"""
         <tr>
@@ -1331,6 +1482,17 @@ class Handler(BaseHTTPRequestHandler):
                     self.html(
                         bar_report_html(conn, event_id),
                         filename=f"mikuna-event-{event_id}-drinks.html",
+                    )
+            except (ValueError, KeyError):
+                self.error(HTTPStatus.NOT_FOUND, "Event not found")
+            return
+        if parsed.path.startswith("/api/events/") and parsed.path.endswith("/food-export"):
+            try:
+                event_id = int(parsed.path.split("/")[3])
+                with connect() as conn:
+                    self.html(
+                        food_report_html(conn, event_id),
+                        filename=f"mikuna-event-{event_id}-food.html",
                     )
             except (ValueError, KeyError):
                 self.error(HTTPStatus.NOT_FOUND, "Event not found")

@@ -2409,6 +2409,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", mime or "application/octet-stream")
         self.send_header("Content-Length", str(len(content)))
+        # Revalidate on every load so browsers pick up a new app.js after an update.
+        self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(content)
 

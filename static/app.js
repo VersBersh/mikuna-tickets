@@ -19,11 +19,12 @@ const state = {
   // All events, newest first (for the default venue), and all venues.
   events: [],
   venues: [],
-  // Layout tab: the venue being edited, its grid and tables, and the square being edited inline.
-  layoutVenueId: null,
+  // Layout editor (opened from Events for one venue): the venue, or a draft with id null for a
+  // new venue; the square being edited inline; where to go back to; ids for draft tables.
   layout: null,
   layoutEdit: null,
-  layoutNameMode: null,
+  layoutReturn: null,
+  layoutDraftId: -1,
   layoutSave: null,
   layoutPendingWrites: 0,
   // Tickets tab: the active event's venue layout and open tickets ({event_id, venue, open}).
@@ -115,14 +116,6 @@ async function switchView(view) {
   if (view !== "order" && !(await leaveOrderView())) return;
   if (view === "tickets" && activeView !== "tickets") clearTicketFilters();
   showView(view);
-  if (view === "layout" && activeView !== "layout") {
-    try {
-      await loadVenues();
-      await showLayout();
-    } catch (error) {
-      showLayoutMessage(error.message);
-    }
-  }
 }
 
 function setTableLocked(locked) {
@@ -1331,8 +1324,10 @@ function renderBoard(matches) {
   $("#boardHint").classList.toggle("hidden", hasGrid);
   $("#boardHintText").textContent = venue
     ? `${venue.name} has no tables yet, so tickets go by table or name below.`
-    : "This event has no venue, so tickets go by table or name below. Pick a venue to click tables instead.";
+    : "This event has no venue, so tickets go by table or name below. Pick a venue on the Events tab to click tables instead.";
+  // With a venue, lay out its tables here; without one, pick a venue on the Events tab.
   $("[data-goto='events']", $("#boardHint")).classList.toggle("hidden", Boolean(venue));
+  $("#boardEditLayout").classList.toggle("hidden", !venue);
   $("#boardNewLabel").textContent = hasGrid ? "Ticket without table" : "New ticket: table or person";
   $("#boardNewName").placeholder = hasGrid ? "Bar, takeaway, Sarah" : "I2, O8, Sarah";
   $("#boardNewTicket").textContent = hasGrid ? "Ticket without table" : "Start ticket";
@@ -1744,10 +1739,6 @@ function today() {
 
 function applyActiveEvent(active) {
   const hadEvent = Boolean(state.activeEvent);
-  // The Layout tab follows the active event's venue when that changes.
-  if ((active?.venue_id ?? null) !== (state.activeEvent?.venue_id ?? null) && active?.venue_id) {
-    state.layoutVenueId = active.venue_id;
-  }
   state.activeEvent = active;
   const hasEvent = Boolean(active);
   $("#activeEventForm").classList.toggle("hidden", !hasEvent);
@@ -1830,61 +1821,61 @@ function venueOptionsHtml() {
   ].join("");
 }
 
-function setVenuePicker(select, nameInput, value) {
+// The Events tab's venue pickers. "New venue…" and "Edit layout" open the layout editor;
+// dataset.committed holds the picked venue, so a cancelled editor can put it back.
+function setVenuePicker(select, value) {
   select.innerHTML = venueOptionsHtml();
-  const known = value === "new" || value === "" || state.venues.some((venue) => String(venue.id) === String(value));
+  const known = value === "" || state.venues.some((venue) => String(venue.id) === String(value));
   select.value = known ? String(value) : "";
-  nameInput.classList.toggle("hidden", select.value !== "new");
+  select.dataset.committed = select.value;
+  updateVenueEditButton(select);
+}
+
+function updateVenueEditButton(select) {
+  $(`#${select.id}Edit`).classList.toggle("hidden", !select.value || select.value === "new");
 }
 
 function renderEventVenuePickers() {
   const newSelect = $("#newEventVenue");
   // Keep what the user picked in the open-event form; otherwise default to the most recent venue.
-  const newValue = newSelect.dataset.touched ? newSelect.value : (recentVenueId() ?? "");
-  setVenuePicker(newSelect, $("#newEventVenueName"), newValue);
-  const activeSelect = $("#activeEventVenue");
-  const activeValue = activeSelect.value === "new" ? "new" : (state.activeEvent?.venue_id ?? "");
-  setVenuePicker(activeSelect, $("#activeEventVenueName"), activeValue);
+  const newValue = newSelect.dataset.touched ? newSelect.dataset.committed : (recentVenueId() ?? "");
+  setVenuePicker(newSelect, newValue);
+  setVenuePicker($("#activeEventVenue"), state.activeEvent?.venue_id ?? "");
 }
 
-function onVenuePickerChange(select, nameInput) {
-  select.dataset.touched = "1";
-  const isNew = select.value === "new";
-  nameInput.classList.toggle("hidden", !isNew);
-  clearFieldInvalid(nameInput);
-  if (isNew) nameInput.focus();
-}
-
-// {venue_id} or {venue_name} for an event request; null when "New venue…" has no name yet.
-function venueChoice(select, nameInput) {
-  if (select.value !== "new") return { venue_id: select.value ? Number(select.value) : null };
-  const venueName = nameInput.value.trim();
-  if (!venueName) {
-    markFieldInvalid(nameInput, "Type a name for the new venue, or pick one from the list.");
-    return null;
+// True when a venue (or No venue) was picked. "New venue…" opens the editor instead.
+function onVenuePickerChange(select) {
+  if (select.value === "new") {
+    select.value = select.dataset.committed || "";
+    openVenueEditor({ venueId: null, picker: select.id });
+    return false;
   }
-  return { venue_name: venueName };
+  select.dataset.touched = "1";
+  select.dataset.committed = select.value;
+  updateVenueEditButton(select);
+  return true;
+}
+
+// {venue_id} for an event request.
+function venueChoice(select) {
+  return { venue_id: select.value && select.value !== "new" ? Number(select.value) : null };
 }
 
 async function saveActiveEvent() {
-  const venue = venueChoice($("#activeEventVenue"), $("#activeEventVenueName"));
-  if (!venue) return;
   try {
     const event = await api("/api/events/active", {
       method: "POST",
       body: JSON.stringify({
         name: $("#activeEventName").value,
         event_date: $("#activeEventDate").value,
-        ...venue,
+        ...venueChoice($("#activeEventVenue")),
       }),
     });
-    $("#activeEventVenue").value = "";
-    $("#activeEventVenueName").value = "";
     setStatus(`Saved event ${event.name}${event.venue_name ? ` at ${event.venue_name}` : ""}`);
     await refreshAll();
   } catch (error) {
     // A refused venue change (tickets at its tables) puts the picker back on the event's venue.
-    if ($("#activeEventVenue").value !== "new") renderEventVenuePickers();
+    renderEventVenuePickers();
     setStatus(error.message);
   }
 }
@@ -1896,16 +1887,12 @@ async function closeEvent() {
     setStatus("Name and date are required before closing the event.");
     return;
   }
-  const venue = venueChoice($("#activeEventVenue"), $("#activeEventVenueName"));
-  if (!venue) return;
   if (!confirm(`Close "${name}"? Ordering stops until you open a new event.`)) return;
   try {
     await api("/api/events/active", {
       method: "POST",
-      body: JSON.stringify({ name, event_date: eventDate, ...venue }),
+      body: JSON.stringify({ name, event_date: eventDate, ...venueChoice($("#activeEventVenue")) }),
     });
-    $("#activeEventVenue").value = "";
-    $("#activeEventVenueName").value = "";
     await api("/api/events/close", { method: "POST" });
     state.currentTicket = null;
     state.openTickets = [];
@@ -1927,15 +1914,12 @@ async function openEvent() {
     return;
   }
   if (!dateInput.value) dateInput.value = today();
-  const venue = venueChoice($("#newEventVenue"), $("#newEventVenueName"));
-  if (!venue) return;
   try {
     const event = await api("/api/events/open", {
       method: "POST",
-      body: JSON.stringify({ name, event_date: dateInput.value, ...venue }),
+      body: JSON.stringify({ name, event_date: dateInput.value, ...venueChoice($("#newEventVenue")) }),
     });
     nameInput.value = "";
-    $("#newEventVenueName").value = "";
     delete $("#newEventVenue").dataset.touched;
     clearOrder();
     await refreshAll();
@@ -1957,40 +1941,132 @@ function showLayoutMessage(text) {
   if (text) setStatus(text);
 }
 
-// Open a venue in the Layout tab: the one asked for, else the last one shown, the active event's,
-// the most recent event's, or the first.
-async function showLayout(venueId = state.layoutVenueId) {
-  const ids = state.venues.map((venue) => venue.id);
-  const id = [venueId, state.activeEvent?.venue_id, recentVenueId(), ids[0]]
-    .find((candidate) => candidate && ids.includes(candidate)) ?? null;
-  state.layoutVenueId = id;
+// The layout editor, for one venue. A new venue (venueId null) is a local draft until Save venue
+// sends it with its tables in one request, so cancelling leaves nothing behind. An existing venue
+// saves each change straight away. picker is the Events tab select to update on the way back;
+// returnTo is the view to go back to.
+async function openVenueEditor({ venueId = null, picker = null, returnTo = "events" } = {}) {
+  let layout;
+  try {
+    layout = venueId
+      ? await api(`/api/venues/${venueId}`)
+      : { id: null, name: "", cols: 12, rows: 8, tables: [], event_count: 0 };
+  } catch (error) {
+    setStatus(error.message);
+    return;
+  }
+  state.layout = layout;
+  state.layoutReturn = { picker, returnTo };
   state.layoutEdit = null;
-  state.layout = id ? await api(`/api/venues/${id}`) : null;
+  state.layoutDraftId = -1;
+  closeVenueNameForm();
+  showLayoutMessage("");
+  const nameInput = $("#layoutNameInput");
+  nameInput.value = "";
+  clearFieldInvalid(nameInput);
   renderLayout();
+  showView("layout");
+  window.scrollTo({ top: 0 });
+  if (!venueId) nameInput.focus();
+}
+
+function isDraftLayout() {
+  return Boolean(state.layout) && state.layout.id === null;
 }
 
 function renderLayout() {
   const layout = state.layout;
-  const hasVenue = Boolean(layout);
-  $("#layoutVenue").innerHTML = state.venues.map((venue) => `
-    <option value="${venue.id}">${escapeHtml(venue.name)} (${venue.table_count} ${venue.table_count === 1 ? "table" : "tables"})</option>
-  `).join("");
-  if (hasVenue) $("#layoutVenue").value = String(layout.id);
-  $$("#layoutToolbar .venue-pick, #renameVenue, #deleteVenue, #layoutToolbar .layout-size, #layoutHelp, #layoutGridWrap")
-    .forEach((element) => element.classList.toggle("hidden", !hasVenue));
-  $("#layoutEmpty").classList.toggle("hidden", hasVenue);
-  if (!hasVenue && !state.layoutNameMode) openVenueNameForm("create", { focus: false });
+  if (!layout) return;
+  const draft = isDraftLayout();
+  $("#layoutTitle").textContent = draft ? "New venue" : layout.name;
+  $("#layoutNameField").classList.toggle("hidden", !draft);
+  $("#layoutVenueActions").classList.toggle("hidden", draft);
+  $("#cancelLayout").classList.toggle("hidden", !draft);
+  $("#saveLayout").textContent = draft ? "Save venue" : "Done";
+  $("#layoutHelp").textContent = draft
+    ? "Click an empty square to add a table. Click a table to rename or remove it. Drag a table to move it. Nothing is saved until Save venue."
+    : "Click an empty square to add a table. Click a table to rename or remove it. Drag a table to move it. Changes save straight away.";
   const active = state.activeEvent;
-  $("#layoutNote").textContent = hasVenue && active?.venue_id === layout.id
+  $("#layoutNote").textContent = !draft && active?.venue_id === layout.id
     ? `Venue of the active event, ${active.name}`
     : "";
-  if (!hasVenue) {
-    $("#layoutGrid").innerHTML = "";
-    return;
-  }
   $("#layoutCols").value = layout.cols;
   $("#layoutRows").value = layout.rows;
   renderLayoutGrid();
+}
+
+// Leave the editor. outcome: a venue id (saved or done), null (venue deleted), undefined (cancelled).
+// The picker it was opened from shows the outcome; cancelling keeps its previous choice.
+async function closeVenueEditor(outcome) {
+  const back = state.layoutReturn || { picker: null, returnTo: "events" };
+  state.layoutReturn = null;
+  state.layout = null;
+  state.layoutEdit = null;
+  closeVenueNameForm();
+  showLayoutMessage("");
+  await loadVenues();
+  const select = back.picker ? $(`#${back.picker}`) : null;
+  if (select && outcome !== undefined) {
+    select.value = outcome === null ? "" : String(outcome);
+    onVenuePickerChange(select);
+  }
+  showView(back.returnTo);
+  const eventVenue = String(state.activeEvent?.venue_id ?? "");
+  if (select?.id === "activeEventVenue" && outcome !== undefined && select.value !== eventVenue) {
+    await saveActiveEvent();
+  } else {
+    await refreshAll();
+  }
+}
+
+async function saveLayoutAction() {
+  if (state.layoutEdit) commitLayoutEdit({ fromBlur: true });
+  if (isDraftLayout()) {
+    await createDraftVenue();
+    return;
+  }
+  const venueId = state.layout.id;
+  // Let queued table changes reach the server first.
+  await (state.layoutSave || Promise.resolve());
+  await closeVenueEditor(venueId);
+}
+
+async function createDraftVenue() {
+  const input = $("#layoutNameInput");
+  const name = input.value.trim();
+  if (!name) {
+    markFieldInvalid(input, "Name the venue before saving it.");
+    return;
+  }
+  const clash = state.venues.find((venue) => venue.name.toLowerCase() === name.toLowerCase());
+  if (clash) {
+    markFieldInvalid(input, `A venue called ${clash.name} already exists.`);
+    return;
+  }
+  const layout = state.layout;
+  try {
+    const venue = await api("/api/venues", {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        cols: layout.cols,
+        rows: layout.rows,
+        tables: layout.tables.map((table) => ({ name: table.name, col: table.col, row: table.row })),
+      }),
+    });
+    await closeVenueEditor(venue.id);
+    setStatus(`Created venue ${venue.name}`);
+  } catch (error) {
+    if (/venue/i.test(error.message)) markFieldInvalid(input, error.message);
+    else showLayoutMessage(error.message);
+  }
+}
+
+function cancelVenueEditor() {
+  const layout = state.layout;
+  const started = layout && (layout.tables.length || $("#layoutNameInput").value.trim());
+  if (isDraftLayout() && started && !confirm("Discard this new venue?")) return;
+  closeVenueEditor(undefined);
 }
 
 function layoutTableAt(col, row) {
@@ -2123,7 +2199,8 @@ function commitLayoutEdit({ fromBlur = false } = {}) {
     renderLayoutGrid();
     queueLayoutWrite(`/api/venues/${state.layout.id}/tables/${edit.tableId}`, "PUT", { name }, `Renamed table to ${name}`);
   } else {
-    state.layout.tables.push({ id: null, name, col: edit.col, row: edit.row });
+    // A new venue's tables get temporary negative ids until it is saved.
+    state.layout.tables.push({ id: isDraftLayout() ? state.layoutDraftId-- : null, name, col: edit.col, row: edit.row });
     renderLayoutGrid();
     queueLayoutWrite(
       `/api/venues/${state.layout.id}/tables`,
@@ -2155,6 +2232,8 @@ function moveLayoutTable(tableId, col, row) {
 // Table changes show at once and are saved in order. Each response carries the whole venue,
 // which replaces the local copy once nothing else is waiting.
 function queueLayoutWrite(path, method, body, doneMessage) {
+  // A new venue is a local draft: Save venue sends it all at once.
+  if (isDraftLayout()) return Promise.resolve();
   const venueId = state.layout.id;
   state.layoutPendingWrites += 1;
   state.layoutSave = (state.layoutSave || Promise.resolve()).then(async () => {
@@ -2254,6 +2333,10 @@ function resizeLayout() {
     const cols = Number($("#layoutCols").value);
     const rows = Number($("#layoutRows").value);
     if (cols === layout.cols && rows === layout.rows) return;
+    if (isDraftLayout()) {
+      resizeDraftLayout(layout, cols, rows);
+      return;
+    }
     try {
       const venue = await api(`/api/venues/${layout.id}`, {
         method: "PUT",
@@ -2273,24 +2356,40 @@ function resizeLayout() {
   });
 }
 
-function openVenueNameForm(mode, { focus = true } = {}) {
-  state.layoutNameMode = mode;
-  const rename = mode === "rename";
-  $("#venueNameLabel").textContent = rename ? "Venue name" : "New venue name";
-  $("#saveVenueName").textContent = rename ? "Rename" : "Create";
-  $("#cancelVenueName").classList.toggle("hidden", !state.layout);
+// The same checks the server makes on a resize, for a venue not saved yet.
+function resizeDraftLayout(layout, cols, rows) {
+  const undo = (message) => {
+    $("#layoutCols").value = layout.cols;
+    $("#layoutRows").value = layout.rows;
+    showLayoutMessage(message);
+  };
+  if (![cols, rows].every((size) => Number.isInteger(size) && size >= 1 && size <= 40)) {
+    undo("Columns and rows must be whole numbers between 1 and 40.");
+    return;
+  }
+  const outside = layout.tables.filter((table) => table.col >= cols || table.row >= rows).map((table) => table.name);
+  if (outside.length) {
+    const one = outside.length === 1;
+    undo(`Can't make the grid ${cols} × ${rows}: ${one ? "table" : "tables"} ${outside.join(", ")} would fall outside it. Move or remove ${one ? "it" : "them"} first.`);
+    return;
+  }
+  layout.cols = cols;
+  layout.rows = rows;
+  state.layoutEdit = null;
+  showLayoutMessage("");
+  renderLayout();
+}
+
+function openVenueNameForm() {
   const input = $("#venueNameInput");
-  input.value = rename ? state.layout.name : "";
+  input.value = state.layout.name;
   clearFieldInvalid(input);
   $("#venueNameForm").classList.remove("hidden");
-  if (focus) {
-    input.focus();
-    input.select();
-  }
+  input.focus();
+  input.select();
 }
 
 function closeVenueNameForm() {
-  state.layoutNameMode = null;
   $("#venueNameForm").classList.add("hidden");
 }
 
@@ -2301,17 +2400,14 @@ async function saveVenueName() {
     markFieldInvalid(input, "Venue name is required.");
     return;
   }
-  const rename = state.layoutNameMode === "rename" && state.layout;
   try {
-    const venue = rename
-      ? await api(`/api/venues/${state.layout.id}`, { method: "PUT", body: JSON.stringify({ name }) })
-      : await api("/api/venues", { method: "POST", body: JSON.stringify({ name }) });
+    const venue = await api(`/api/venues/${state.layout.id}`, { method: "PUT", body: JSON.stringify({ name }) });
     closeVenueNameForm();
     showLayoutMessage("");
+    if (state.layout?.id === venue.id) state.layout.name = venue.name;
+    renderLayout();
     await loadVenues();
-    await showLayout(venue.id);
-    setStatus(rename ? `Renamed venue to ${venue.name}` : `Created venue ${venue.name}`);
-    if (state.activeEvent?.venue_id === venue.id) await renderEvents();
+    setStatus(`Renamed venue to ${venue.name}`);
   } catch (error) {
     markFieldInvalid(input, error.message);
   }
@@ -2325,10 +2421,7 @@ async function deleteVenue() {
   if (!layout.event_count && !confirm(`Delete venue ${layout.name}${count ? ` and its ${count} ${count === 1 ? "table" : "tables"}` : ""}?`)) return;
   try {
     await api(`/api/venues/${layout.id}`, { method: "DELETE" });
-    showLayoutMessage("");
-    state.layoutVenueId = null;
-    await loadVenues();
-    await showLayout(null);
+    await closeVenueEditor(null);
     setStatus(`Deleted venue ${layout.name}`);
   } catch (error) {
     showLayoutMessage(error.message);
@@ -2450,38 +2543,34 @@ $("#newEventName").addEventListener("keydown", (event) => {
 $("#goToEvents").addEventListener("click", () => switchView("events"));
 $("#barExportActive").addEventListener("click", openBarExport);
 $("#foodExportActive").addEventListener("click", openFoodExport);
-$("#newEventVenue").addEventListener("change", () => onVenuePickerChange($("#newEventVenue"), $("#newEventVenueName")));
-$("#newEventVenueName").addEventListener("input", () => clearFieldInvalid($("#newEventVenueName")));
-$("#newEventVenueName").addEventListener("keydown", (event) => {
-  if (event.key === "Enter") openEvent();
-});
+$("#newEventVenue").addEventListener("change", () => onVenuePickerChange($("#newEventVenue")));
 $("#activeEventVenue").addEventListener("change", () => {
-  onVenuePickerChange($("#activeEventVenue"), $("#activeEventVenueName"));
-  if ($("#activeEventVenue").value !== "new") saveActiveEvent();
+  if (onVenuePickerChange($("#activeEventVenue"))) saveActiveEvent();
 });
-$("#activeEventVenueName").addEventListener("input", () => clearFieldInvalid($("#activeEventVenueName")));
-$("#activeEventVenueName").addEventListener("keydown", (event) => {
-  if (event.key === "Enter") saveActiveEvent();
+["newEventVenue", "activeEventVenue"].forEach((id) => {
+  $(`#${id}Edit`).addEventListener("click", () => {
+    const venueId = Number($(`#${id}`).value);
+    if (venueId) openVenueEditor({ venueId, picker: id });
+  });
 });
-
-$("#layoutVenue").addEventListener("change", async () => {
-  closeVenueNameForm();
-  showLayoutMessage("");
-  try {
-    await showLayout(Number($("#layoutVenue").value));
-  } catch (error) {
-    showLayoutMessage(error.message);
-  }
+$("#boardEditLayout").addEventListener("click", () => {
+  const venueId = state.board?.venue?.id;
+  if (venueId) openVenueEditor({ venueId, returnTo: "tickets" });
 });
-$("#newVenue").addEventListener("click", () => openVenueNameForm("create"));
-$("#renameVenue").addEventListener("click", () => openVenueNameForm("rename"));
+$("#saveLayout").addEventListener("click", saveLayoutAction);
+$("#cancelLayout").addEventListener("click", cancelVenueEditor);
+$("#layoutNameInput").addEventListener("input", () => clearFieldInvalid($("#layoutNameInput")));
+$("#layoutNameInput").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") $("#layoutNameInput").blur();
+});
+$("#renameVenue").addEventListener("click", openVenueNameForm);
 $("#deleteVenue").addEventListener("click", deleteVenue);
 $("#saveVenueName").addEventListener("click", saveVenueName);
 $("#cancelVenueName").addEventListener("click", closeVenueNameForm);
 $("#venueNameInput").addEventListener("input", () => clearFieldInvalid($("#venueNameInput")));
 $("#venueNameInput").addEventListener("keydown", (event) => {
   if (event.key === "Enter") saveVenueName();
-  else if (event.key === "Escape" && state.layout) closeVenueNameForm();
+  else if (event.key === "Escape") closeVenueNameForm();
 });
 // change also fires on Enter.
 $("#layoutCols").addEventListener("change", resizeLayout);

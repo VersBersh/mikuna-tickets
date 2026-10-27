@@ -18,7 +18,6 @@
       <button class="tab active" data-view="tickets" type="button">Tickets</button>
       <span class="ticket-tabs" id="ticketTabs"></span>
       <button class="tab" data-view="menu" type="button">Menu</button>
-      <button class="tab" data-view="layout" type="button">Layout</button>
       <button class="tab" data-view="totals" type="button">Totals</button>
       <button class="tab" data-view="events" type="button">Events</button>
     </nav>
@@ -121,7 +120,7 @@
             </div>
             <div class="board-hint hidden" id="boardHint">
               <span id="boardHintText"></span>
-              <button class="link-btn" data-goto="layout" type="button">Lay out tables</button>
+              <button class="link-btn" id="boardEditLayout" type="button">Lay out tables</button>
               <button class="link-btn" data-goto="events" type="button">Pick the event's venue</button>
             </div>
             <div class="layout-grid-wrap" id="boardGridWrap">
@@ -186,15 +185,20 @@
       <section class="view" id="view-layout">
         <section class="surface layout-surface">
           <div class="surface-title">
-            <h2>Table layout</h2>
-            <span class="layout-note" id="layoutNote"></span>
+            <div class="layout-heading">
+              <h2 id="layoutTitle">Table layout</h2>
+              <span class="layout-note" id="layoutNote"></span>
+            </div>
+            <div class="title-actions">
+              <button id="cancelLayout" type="button">Cancel</button>
+              <button class="accent" id="saveLayout" type="button">Save venue</button>
+            </div>
           </div>
           <div class="layout-toolbar" id="layoutToolbar">
-            <label class="field venue-pick"><span>Venue</span><select id="layoutVenue"></select></label>
-            <div class="layout-venue-actions">
-              <button id="newVenue" type="button">New venue</button>
+            <label class="field layout-name" id="layoutNameField"><span>Venue name</span><input id="layoutNameInput" autocomplete="off" maxlength="60" placeholder="The Rad"></label>
+            <div class="layout-venue-actions" id="layoutVenueActions">
               <button id="renameVenue" type="button">Rename</button>
-              <button class="danger" id="deleteVenue" type="button">Delete</button>
+              <button class="danger" id="deleteVenue" type="button">Delete venue</button>
             </div>
             <div class="layout-size">
               <label class="field"><span>Columns</span><input id="layoutCols" type="number" min="1" max="40" step="1"></label>
@@ -203,16 +207,15 @@
             </div>
           </div>
           <div class="layout-name-form hidden" id="venueNameForm">
-            <label class="field"><span id="venueNameLabel">New venue name</span><input id="venueNameInput" autocomplete="off" maxlength="60" placeholder="The Rad"></label>
-            <button class="accent" id="saveVenueName" type="button">Create</button>
+            <label class="field"><span>Venue name</span><input id="venueNameInput" autocomplete="off" maxlength="60" placeholder="The Rad"></label>
+            <button class="accent" id="saveVenueName" type="button">Rename</button>
             <button id="cancelVenueName" type="button">Cancel</button>
           </div>
           <div class="layout-message hidden" id="layoutMessage" role="alert"></div>
-          <p class="help-text layout-help" id="layoutHelp">Click an empty square to add a table. Click a table to rename or remove it. Drag a table to move it. Changes save straight away.</p>
+          <p class="help-text layout-help" id="layoutHelp"></p>
           <div class="layout-grid-wrap" id="layoutGridWrap">
             <div class="layout-grid" id="layoutGrid"></div>
           </div>
-          <div class="empty hidden" id="layoutEmpty">No venues yet. Name your first venue above to lay out its tables.</div>
         </section>
       </section>
 
@@ -246,8 +249,10 @@
               <label class="field"><span>Date</span><input id="newEventDate" type="date" required></label>
               <div class="field venue-pick">
                 <label for="newEventVenue">Venue</label>
-                <select id="newEventVenue"></select>
-                <input class="hidden" id="newEventVenueName" autocomplete="off" maxlength="60" placeholder="New venue name" aria-label="New venue name">
+                <div class="venue-select-row">
+                  <select id="newEventVenue"></select>
+                  <button class="link-btn hidden" id="newEventVenueEdit" type="button">Edit layout</button>
+                </div>
               </div>
               <button class="accent" id="openEvent" type="button">Open event</button>
             </div>
@@ -257,8 +262,10 @@
               <label class="field"><span>Date</span><input id="activeEventDate" type="date"></label>
               <div class="field venue-pick">
                 <label for="activeEventVenue">Venue</label>
-                <select id="activeEventVenue"></select>
-                <input class="hidden" id="activeEventVenueName" autocomplete="off" maxlength="60" placeholder="New venue name" aria-label="New venue name">
+                <div class="venue-select-row">
+                  <select id="activeEventVenue"></select>
+                  <button class="link-btn hidden" id="activeEventVenueEdit" type="button">Edit layout</button>
+                </div>
               </div>
               <div class="event-actions">
                 <button id="saveActiveEvent" type="button">Save event</button>

@@ -969,7 +969,24 @@ input[readonly] {
 }
 
 .event-form {
-  grid-template-columns: minmax(160px, 1fr) 145px minmax(130px, 200px) auto;
+  grid-template-columns: minmax(140px, 1fr) 145px minmax(170px, 260px) auto;
+}
+
+/* Venue select with its Edit layout link. */
+.venue-select-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.venue-select-row select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.venue-select-row .link-btn {
+  flex: none;
+  white-space: nowrap;
 }
 
 .event-form button {
@@ -1215,9 +1232,16 @@ input[readonly] {
   margin-bottom: 12px;
 }
 
-.layout-toolbar .venue-pick {
+.layout-toolbar .layout-name {
   min-width: 200px;
-  flex: 0 1 280px;
+  flex: 0 1 320px;
+}
+
+.layout-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
 }
 
 .layout-venue-actions {

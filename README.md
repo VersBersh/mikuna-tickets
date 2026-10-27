@@ -26,7 +26,7 @@ The app creates `mikuna.db` automatically on first run. That file is your local 
 
 ## Event Setup
 
-1. Open an event on the `Events` tab, optionally at a venue. Lay out a venue's tables on the `Layout` tab.
+1. Open an event on the `Events` tab, optionally at a venue. Pick `New venue…` in the venue list to name a venue and lay out its tables, or `Edit layout` next to the list to change one.
 2. Open the `Menu` tab.
 3. Add today’s menu codes, item names, and prices.
 4. Use the `Tickets` tab to take orders. It shows the venue's tables: click a free table to start its ticket, or a highlighted table (with the amount due) to add items, take payment or move it to another table. Each table has at most one open ticket. `Ticket without table` is for the bar, takeaway or a name. Without a venue, tickets go by a typed table or name.

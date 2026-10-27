@@ -975,14 +975,22 @@ def venue_payload(conn: sqlite3.Connection, venue_id: int) -> dict:
 
 
 def create_venue(conn: sqlite3.Connection, data: dict) -> dict:
+    """Create a venue, with its tables [{name, col, row}] when sent (the layout editor's draft).
+    A bad table fails the whole request, so no half-made venue is left behind."""
     name = clean_venue_name(conn, data.get("name"))
     cols = grid_size(data.get("cols", 12), "Columns")
     grid_rows = grid_size(data.get("rows", 8), "Rows")
+    tables = data.get("tables") or []
+    if not isinstance(tables, list) or not all(isinstance(table, dict) for table in tables):
+        raise ValueError("Tables must be a list of {name, col, row}.")
     cur = conn.execute(
         "INSERT INTO venues (name, grid_cols, grid_rows) VALUES (?, ?, ?)",
         (name, cols, grid_rows),
     )
-    return venue_payload(conn, int(cur.lastrowid))
+    venue_id = int(cur.lastrowid)
+    for table in tables:
+        add_venue_table(conn, venue_id, table)
+    return venue_payload(conn, venue_id)
 
 
 def update_venue(conn: sqlite3.Connection, venue_id: int, data: dict) -> dict:
@@ -2346,7 +2354,7 @@ class Handler(BaseHTTPRequestHandler):
     def venue_api(self, method: str, path: str) -> None:
         """Venues and their table layouts:
 
-        GET /api/venues, POST /api/venues {name, cols?, rows?},
+        GET /api/venues, POST /api/venues {name, cols?, rows?, tables?: [{name, col, row}]},
         GET/PUT/DELETE /api/venues/<id> (PUT {name?, cols?, rows?}),
         POST /api/venues/<id>/tables {name, col, row},
         PUT/DELETE /api/venues/<id>/tables/<table id> (PUT {name?, col?, row?}).

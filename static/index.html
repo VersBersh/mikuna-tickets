@@ -15,7 +15,7 @@
     </header>
 
     <nav class="tabs" id="mainTabs" aria-label="Main views">
-      <button class="tab active" data-view="tickets" type="button">Tickets</button>
+      <button class="tab active" data-view="tickets" type="button">Tables</button>
       <span class="ticket-tabs" id="ticketTabs"></span>
       <button class="tab" data-view="menu" type="button">Menu</button>
       <button class="tab" data-view="totals" type="button">Totals</button>
@@ -28,8 +28,11 @@
           <section class="surface" id="ticketSurface">
             <div class="surface-title">
               <div class="pay-title">
-                <button id="backToBoard" type="button">&larr; Tables</button>
                 <h2 id="orderTitle">New ticket</h2>
+                <div id="tableLocked" class="table-locked hidden">
+                  <h3 id="tableLockedText"></h3>
+                  <button id="editTable" class="link-btn" type="button" aria-label="Change table">&#9998; Change</button>
+                </div>
               </div>
               <div class="title-actions">
                 <button id="clearOrder" type="button">Clear</button>
@@ -37,15 +40,10 @@
                 <button class="accent hidden" id="payAction" type="button">Pay</button>
               </div>
             </div>
-            <div id="ticketBanner" class="banner hidden"></div>
             <label class="field table-edit" id="tableEdit">
               <span>Table or person</span>
               <input id="tableNo" autocomplete="off" placeholder="I2, O8, Sarah &mdash; press Enter">
             </label>
-            <div id="tableLocked" class="table-locked hidden">
-              <h3 id="tableLockedText"></h3>
-              <button id="editTable" class="link-btn" type="button" aria-label="Change table">&#9998; Change</button>
-            </div>
             <div id="tablePicker" class="table-picker hidden">
               <div class="table-picker-head">
                 <strong id="tablePickerTitle">Pick a table</strong>
@@ -90,7 +88,6 @@
               </div>
               <button id="addSplit" type="button">Add split</button>
             </div>
-            <div id="paySummary" class="banner"></div>
             <div id="splits" class="splits"></div>
             <div id="paymentTotals" class="payment-totals hidden">
               <span>Due<strong id="orderSubtotal">&euro;0.00</strong></span>
@@ -99,6 +96,13 @@
               <span>Left after these<strong id="orderRemainingAfterDraft">&euro;0.00</strong></span>
             </div>
           </section>
+
+          <aside id="paySplitSummary" class="order-summary pay-split-summary hidden" aria-label="Payment summary">
+            <div class="order-summary-head">
+              <h2 id="paySplitSummaryTitle">Bill</h2>
+            </div>
+            <div id="paySplitSummaryBody"></div>
+          </aside>
         </div>
       </section>
 
@@ -243,7 +247,7 @@
       <section class="view" id="view-events">
         <div class="grid two">
           <section class="surface">
-            <div class="surface-title"><h2>Active event</h2></div>
+            <div class="surface-title"><h2 id="eventPanelTitle">Current event</h2></div>
             <div class="event-form hidden" id="openEventForm">
               <label class="field"><span>Name</span><input id="newEventName" autocomplete="off" required placeholder="Mikuna at the Rad"></label>
               <label class="field"><span>Date</span><input id="newEventDate" type="date" required></label>
@@ -256,7 +260,7 @@
               </div>
               <button class="accent" id="openEvent" type="button">Open event</button>
             </div>
-            <p class="help-text hidden" id="openEventHelp">No event is active. Open one to start taking orders.</p>
+            <p class="help-text hidden" id="openEventHelp">No event is running. Fill in the details and click Open event to start taking orders.</p>
             <div class="event-form" id="activeEventForm">
               <label class="field"><span>Name</span><input id="activeEventName" autocomplete="off"></label>
               <label class="field"><span>Date</span><input id="activeEventDate" type="date"></label>
@@ -320,6 +324,15 @@
       </div>
     </template>
 
+    <dialog id="confirmDialog" class="confirm-dialog" aria-labelledby="confirmMessage">
+      <form method="dialog">
+        <p id="confirmMessage"></p>
+        <div class="confirm-actions">
+          <button value="cancel" type="submit">Cancel</button>
+          <button value="ok" type="submit" id="confirmOk" class="accent">OK</button>
+        </div>
+      </form>
+    </dialog>
     <script src="/app.js" defer></script>
   </body>
 </html>

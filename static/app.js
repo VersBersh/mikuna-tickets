@@ -124,6 +124,17 @@ function setTableLocked(locked) {
   $("#tableEdit").classList.toggle("hidden", lock);
   $("#tableLocked").classList.toggle("hidden", !lock);
   $("#tableLockedText").textContent = lock ? tableLabel(value) : "";
+  updateOrderTitle();
+}
+
+// The ticket is headed by its table; a title is only shown for a paid ticket or a new one with no table yet.
+function updateOrderTitle() {
+  const ticket = state.currentTicket;
+  const title = ticket
+    ? (ticket.outstanding <= 0.009 ? "Paid" : "")
+    : ($("#tableLocked").classList.contains("hidden") ? "New order" : "");
+  $("#orderTitle").textContent = title;
+  $("#orderTitle").classList.toggle("hidden", !title);
 }
 
 async function checkTableClash() {
@@ -214,8 +225,7 @@ function renderTicketTabs() {
         data-ticket-tab="${ticket.id}"
         type="button"
       >
-        #${ticket.id} ${ticket.table_no}
-        <span>${fmt(ticket.outstanding)}</span>
+        ${escapeHtml(tableLabel(ticket.table_no))}
       </button>
       <button
         class="ticket-tab-close"
@@ -328,25 +338,24 @@ function billSubtotal() {
 function renderMenuPicker() {
   const list = $("#menuList");
   list.innerHTML = "";
-  $("#orderTitle").textContent = state.currentTicket ? `Ticket #${state.currentTicket.id}` : "New order";
+  updateOrderTitle();
   $("#saveAction").classList.toggle("hidden", Boolean(state.currentTicket));
   $("#clearOrder").classList.toggle("hidden", Boolean(state.currentTicket));
   applyTicketMode();
   $("#addSplit").classList.toggle("hidden", Boolean(state.currentTicket && state.currentTicket.outstanding <= 0.009));
   $$(".new-only").forEach((node) => node.classList.remove("hidden"));
-  if (state.currentTicket) {
-    $("#ticketBanner").classList.remove("hidden");
-    $("#ticketBanner").classList.toggle("settled", state.currentTicket.outstanding <= 0.009);
-    $("#ticketBanner").classList.toggle("open-ticket", state.currentTicket.outstanding > 0.009);
-    $("#ticketBanner").innerHTML = `${fmt(state.currentTicket.outstanding)} remaining · ${state.currentTicket.outstanding <= 0.009 ? "Settled" : "Open"} · ${state.currentTicket.note || "No note"}`;
-  } else {
-    $("#ticketBanner").classList.add("hidden");
-    $("#ticketBanner").classList.remove("settled", "open-ticket");
+  // Items already on the ticket go first. The order is fixed when a ticket is opened (reset in
+  // clearOrder and on a fresh loadTicketIntoForm), so rows don't jump when autosave re-renders.
+  if (!state.pickerPinned) {
+    state.pickerPinned = new Set(state.menu.filter((item) => (state.quantities[item.code] || 0) > 0).map((item) => item.code));
   }
-  state.menu.filter((item) => item.active).forEach((item) => {
+  const active = state.menu.filter((item) => item.active);
+  const pinned = active.filter((item) => state.pickerPinned.has(item.code));
+  const rest = active.filter((item) => !state.pickerPinned.has(item.code));
+  [...pinned, ...rest].forEach((item, index) => {
     const existing = ticketItemByCode(item.code);
     const row = document.createElement("div");
-    row.className = `menu-row ${item.category === "food" ? "food" : ""}`;
+    row.className = `menu-row ${item.category === "food" ? "food" : ""}${pinned.length && rest.length && index === pinned.length - 1 ? " last-pinned" : ""}`;
     row.dataset.search = `${item.code} ${item.name}`.toLowerCase();
     row.innerHTML = `
       <div><strong>${item.name}</strong><span>${item.code}</span><span>${fmt(existing?.unit_price || item.price)}</span></div>
@@ -398,14 +407,56 @@ function applyTicketMode() {
   $("#ticketSurface").classList.toggle("hidden", paying);
   $("#orderSummary").classList.toggle("hidden", paying);
   $("#paymentSurface").classList.toggle("hidden", !paying);
+  $("#paySplitSummary").classList.toggle("hidden", !paying);
   $("#payAction").classList.toggle("hidden", !ticket || paying);
   if (!ticket) return;
   const settled = ticket.outstanding <= 0.009;
   $("#payAction").textContent = settled ? "Payments" : `Pay ${fmt(ticket.outstanding)}`;
-  const itemCount = ticket.items.reduce((sum, item) => sum + money(item.quantity), 0);
-  $("#paySummary").classList.toggle("settled", settled);
-  $("#paySummary").classList.toggle("open-ticket", !settled);
-  $("#paySummary").innerHTML = `<strong>${ticket.table_no}</strong> · ${fmtQty(itemCount)} ${itemCount === 1 ? "item" : "items"} · ${settled ? "Settled" : `${fmt(ticket.outstanding)} remaining`}`;
+  renderPaySplitSummary();
+}
+
+// Right-hand summary while paying, readable by the guests: each split with what it covers.
+// The split being taken is on top; paid splits are listed below it.
+function renderPaySplitSummary() {
+  const ticket = state.currentTicket;
+  if (!ticket || $("#paySplitSummary").classList.contains("hidden")) return;
+  const itemName = (code) => ticketItemByCode(code)?.name || state.menu.find((item) => item.code === code)?.name || code;
+  const itemLines = (allocations) => allocations.map((allocation) => `
+    <li>
+      <span class="qty">${fmtQty(allocation.quantity)}&times;</span>
+      <span class="name">${escapeHtml(itemName(allocation.menu_code))}</span>
+      <span class="amount">${fmt(allocation.amount)}</span>
+    </li>
+  `).join("");
+  const splitBlock = (split, paid) => {
+    const lines = split.split_type === "percent"
+      ? `<li><span class="qty"></span><span class="name">${fmtQty(split.split_percent)}% of the bill</span><span class="amount">${fmt(split.subtotal)}</span></li>`
+      : itemLines(split.allocations || []);
+    const tip = money(split.total_with_tip) - money(split.subtotal);
+    return `
+      <section class="pay-split ${paid ? "paid" : "pending"}">
+        <div class="pay-split-head">
+          <strong>Split ${split.split_no}</strong>
+          ${paid ? "" : "<span>Not paid yet</span>"}
+        </div>
+        <ul>${lines}</ul>
+        ${tip > 0.004 ? `<div class="pay-split-line"><span>Tip</span><span>${fmt(tip)}</span></div>` : ""}
+        <div class="pay-split-line total"><span>Total</span><strong>${fmt(split.total_with_tip)}</strong></div>
+      </section>
+    `;
+  };
+  const saved = (ticket.payments || [])
+    .filter((payment) => Number(payment.id) !== Number(state.editingPaymentId))
+    .map((payment) => splitBlock(payment, true));
+  const drafts = $$(".editable-split")
+    .map((row, index) => splitData(row, index))
+    .filter((split) => split.subtotal > 0.004)
+    .map((split) => splitBlock(split, false));
+  $("#paySplitSummaryTitle").textContent = tableLabel(ticket.table_no);
+  $("#paySplitSummaryBody").innerHTML = `
+    ${drafts.join("") || (saved.length ? "" : `<p class="pay-split-empty">Pick items in a split to see it here.</p>`)}
+    ${saved.length ? `<div class="pay-split-paid-head">Paid</div>${saved.join("")}` : ""}
+  `;
 }
 
 async function setTicketMode(mode) {
@@ -421,7 +472,7 @@ async function setTicketMode(mode) {
 function renderFinalizedSplits() {
   const root = $("#splits");
   if (!root) return;
-  $$(".final-split", root).forEach((node) => node.remove());
+  $$(".final-split, .final-splits-head", root).forEach((node) => node.remove());
   const ticket = state.currentTicket;
   if (!ticket) return;
   const payments = ticket.payments || [];
@@ -446,7 +497,12 @@ function renderFinalizedSplits() {
       $("[data-edit-payment]", row).addEventListener("click", () => editSavedPayment(payment.id));
       return row;
     });
-  rows.reverse().forEach((row) => root.prepend(row));
+  // Paid splits sit below the split being taken (CSS order), under their own heading.
+  if (!rows.length) return;
+  const head = document.createElement("div");
+  head.className = "final-splits-head";
+  head.textContent = "Paid";
+  root.append(head, ...rows);
 }
 
 function renderTicketFilters() {
@@ -519,7 +575,7 @@ function addSplit(markAsDirty = true, payment = null) {
   node.addEventListener("input", () => touchSplit(node), true);
   $(".remove-split", node).addEventListener("click", async () => {
     if (payment) {
-      if (!confirm("Remove this saved split?")) return;
+      if (!(await confirmDialog("Remove this saved split?", { confirmLabel: "Remove", danger: true }))) return;
       try {
         const ticket = await api(`/api/payments/${payment.id}`, { method: "DELETE" });
         state.currentTicket = ticket;
@@ -615,8 +671,8 @@ function addSplit(markAsDirty = true, payment = null) {
   if (markAsDirty) markDirty();
 }
 
-function editSavedPayment(paymentId) {
-  if (paymentPayloads().length && !confirm("Discard the current unsaved split draft?")) return;
+async function editSavedPayment(paymentId) {
+  if (paymentPayloads().length && !(await confirmDialog("Discard the current unsaved split draft?", { confirmLabel: "Discard", danger: true }))) return;
   const payment = state.currentTicket?.payments?.find((row) => Number(row.id) === Number(paymentId));
   if (!payment) return;
   state.editingPaymentId = payment.id;
@@ -953,6 +1009,7 @@ function recalc() {
   $("#orderTips").textContent = fmt(tip);
   $("#orderTotal").textContent = fmt(totalWithTip);
   $("#paymentTotals").classList.toggle("hidden", splits.length < 2);
+  renderPaySplitSummary();
 }
 
 function draftBaseSubtotal() {
@@ -1033,20 +1090,20 @@ async function saveCurrentWork(
       });
       if (hasPayments) {
         ticket = await savePaymentPayloads(payments, ticket);
+        state.editingPaymentId = null;
       }
       state.currentTicket = ticket;
-      state.editingPaymentId = null;
       state.dirty = false;
-      setStatus(`${autosave ? "Autosaved" : "Saved"} ticket #${ticket.id}`);
+      setStatus(`${autosave ? "Autosaved" : "Saved"} ${tableLabel(ticket.table_no)}`);
       upsertTicketTab(ticket);
-      loadTicketIntoForm(ticket);
+      loadTicketIntoForm(ticket, { keepDrafts: !hasPayments });
     } else {
       if (!hasTicketDraft()) {
         state.dirty = false;
         return true;
       }
       const order = await api("/api/orders", { method: "POST", body: JSON.stringify(orderPayload()) });
-      setStatus(`${autosave ? "Autosaved" : "Saved"} ticket #${order.id} for ${order.table_no}`);
+      setStatus(`${autosave ? "Autosaved" : "Saved"} ${tableLabel(order.table_no)}`);
       state.dirty = false;
       if (clearAfter || hasPayments) {
         clearOrder();
@@ -1063,7 +1120,7 @@ async function saveCurrentWork(
       // The table already has an open ticket (one per table): open that one, with these items added.
       state.autosaveInFlight = false;
       await openTicketWithDraft(Number(error.body.order_id));
-      setStatus(`${error.message.split(".")[0]}, so this order went on ticket #${error.body.order_id}.`);
+      setStatus(`${error.message.split(".")[0]}, so this order went on its open ticket.`);
       await refreshAll();
       return false;
     }
@@ -1101,18 +1158,19 @@ async function saveAction() {
 }
 
 async function clearOrderAction() {
-  if (hasClearableNewOrderDraft() && !confirm("Clear this new order?")) {
+  if (hasClearableNewOrderDraft() && !(await confirmDialog("Clear this new order?", { confirmLabel: "Clear", danger: true }))) {
     return;
   }
   clearOrder();
   await switchView("tickets");
 }
 
+// Saves items and note only: a split is never paid by an autosave, only by its Done button.
 async function flushAutosave() {
-  if (!state.dirty && !hasTicketDraft() && !(state.currentTicket && paymentPayloads().length)) {
+  if (!state.dirty && !hasTicketDraft()) {
     return true;
   }
-  return saveCurrentWork({ clearAfter: Boolean(state.currentTicket), autosave: true });
+  return saveCurrentWork({ clearAfter: Boolean(state.currentTicket), autosave: true, includePayments: false });
 }
 
 function clearOrder() {
@@ -1122,6 +1180,7 @@ function clearOrder() {
   state.ticketModeId = null;
   state.dirty = false;
   state.draftTableId = null;
+  state.pickerPinned = null;
   closeTablePicker();
   state.quantities = {};
   state.menu.forEach((item) => { state.quantities[item.code] = 0; });
@@ -1138,16 +1197,19 @@ function clearOrder() {
   renderTicketTabs();
 }
 
-function loadTicketIntoForm(ticket) {
+// keepDrafts: a reload of the same ticket after saving its items keeps the splits being filled in.
+function loadTicketIntoForm(ticket, { keepDrafts = false } = {}) {
   const freshOpen = state.ticketModeId !== ticket.id;
+  const keepSplits = keepDrafts && !freshOpen;
   if (freshOpen) {
     closeTablePicker();
     state.ticketMode = "edit";
     state.ticketModeId = ticket.id;
     state.openedQuantities = Object.fromEntries(ticket.items.map((item) => [item.menu_code, money(item.quantity)]));
+    state.pickerPinned = null;
   }
   state.currentTicket = ticket;
-  state.editingPaymentId = null;
+  if (!keepSplits) state.editingPaymentId = null;
   state.quantities = {};
   state.menu.forEach((item) => { state.quantities[item.code] = 0; });
   ticket.items.forEach((item) => { state.quantities[item.menu_code] = item.quantity; });
@@ -1158,9 +1220,11 @@ function loadTicketIntoForm(ticket) {
   }
   $("#tableClash").classList.add("hidden");
   $("#orderNote").value = ticket.note || "";
-  $("#splits").innerHTML = "";
-  state.splitCount = 0;
-  if (ticket.outstanding > 0.009) addSplit(false);
+  if (!keepSplits) {
+    $("#splits").innerHTML = "";
+    state.splitCount = 0;
+    if (ticket.outstanding > 0.009) addSplit(false);
+  }
   renderMenuPicker();
   state.dirty = false;
   renderTicketTabs();
@@ -1249,7 +1313,7 @@ function layoutGridHtml(grid, layout, cell) {
 }
 
 // Read-only grid squares for the Tickets tab and the picker: tables with an open ticket are
-// highlighted with the amount due; with a search, matching tables are marked and the rest dimmed.
+// highlighted (amount due only in the tooltip); with a search, matching tables are marked and the rest dimmed.
 function boardGridHtml(grid, { matches = null, currentTableId = null, picking = false } = {}) {
   const layout = state.board.venue;
   grid.classList.toggle("searching", Boolean(matches));
@@ -1271,7 +1335,7 @@ function boardGridHtml(grid, { matches = null, currentTableId = null, picking = 
         : picking ? "free: move here" : "free: start a ticket";
     return `
       <button class="${classes}" type="button" data-board-table="${table.id}" title="${label}: ${what}" aria-label="${label}, ${what}">
-        <strong>${escapeHtml(table.name)}</strong>${open ? `<span>${fmt(open.outstanding)}</span>` : ""}
+        <strong>${escapeHtml(table.name)}</strong>
       </button>
     `;
   });
@@ -1346,7 +1410,7 @@ function renderTicketRows(root, tickets, emptyText) {
           <strong>${escapeHtml(tableLabel(ticket.table_no))}</strong>
           <span class="due">${settled ? "Settled" : `${fmt(ticket.outstanding)} due`}</span>
           ${noTable && !settled ? `<span class="tag">No table</span>` : ""}
-          <small>#${ticket.id}${ticket.note ? ` · ${escapeHtml(ticket.note)}` : ""}</small>
+          ${ticket.note ? `<small>${escapeHtml(ticket.note)}</small>` : ""}
         </div>
         <div class="row-actions">
           <button data-open-ticket="${ticket.id}" type="button">Open</button>
@@ -1358,7 +1422,7 @@ function renderTicketRows(root, tickets, emptyText) {
   $$("[data-open-ticket]", root).forEach((button) => button.addEventListener("click", () => openTicketTab(button.dataset.openTicket)));
   $$("[data-delete]", root).forEach((button) => {
     button.addEventListener("click", async () => {
-      if (!confirm("Delete this ticket?")) return;
+      if (!(await confirmDialog("Delete this ticket?", { confirmLabel: "Delete", danger: true }))) return;
       await api(`/api/orders/${button.dataset.delete}`, { method: "DELETE" });
       closeTicketTab(button.dataset.delete);
       await refreshAll();
@@ -1394,7 +1458,7 @@ function renderTablePicker() {
   }
   const ticket = state.currentTicket;
   $("#tablePickerTitle").textContent = ticket
-    ? `Move ticket #${ticket.id} from ${tableLabel(ticket.table_no)} to:`
+    ? `Move ${tableLabel(ticket.table_no)} to:`
     : "Pick a table";
   const grid = $("#pickerGrid");
   grid.innerHTML = boardGridHtml(grid, {
@@ -1416,11 +1480,11 @@ async function pickTable(tableId) {
   }
   const busy = openTicketAtTable(tableId);
   if (busy && busy.id !== ticket?.id) {
-    showPickerMessage(`${tableLabel(table.name)} already has an open ticket (#${busy.id}). Pick an empty table.`);
+    showPickerMessage(`${tableLabel(table.name)} already has an open ticket. Pick an empty table.`);
     return;
   }
   if (ticket) {
-    if (!confirm(`Move this ticket from ${tableLabel(ticket.table_no)} to ${tableLabel(table.name)}?`)) return;
+    if (!(await confirmDialog(`Move this ticket from ${tableLabel(ticket.table_no)} to ${tableLabel(table.name)}?`, { confirmLabel: "Move" }))) return;
     await moveCurrentTicket({ venue_table_id: tableId, table_no: table.name });
     return;
   }
@@ -1453,7 +1517,7 @@ async function moveCurrentTicket(target) {
     closeTablePicker();
     upsertTicketTab(moved);
     loadTicketIntoForm(moved);
-    setStatus(`Moved ticket #${moved.id} to ${tableLabel(moved.table_no)}`);
+    setStatus(`Moved to ${tableLabel(moved.table_no)}`);
     await refreshAll();
   } catch (error) {
     $("#tableNo").value = ticket.table_no;
@@ -1737,10 +1801,14 @@ function today() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
+// Views that need an open event.
+const EVENT_VIEWS = ["tickets", "order", "menu", "totals"];
+
 function applyActiveEvent(active) {
   const hadEvent = Boolean(state.activeEvent);
   state.activeEvent = active;
   const hasEvent = Boolean(active);
+  $("#eventPanelTitle").textContent = hasEvent ? "Current event" : "New event";
   $("#activeEventForm").classList.toggle("hidden", !hasEvent);
   $("#activeEventHelp").classList.toggle("hidden", !hasEvent);
   $("#openEventForm").classList.toggle("hidden", hasEvent);
@@ -1748,8 +1816,12 @@ function applyActiveEvent(active) {
   $("#orderGrid").classList.toggle("hidden", !hasEvent);
   $("#ticketsBoard").classList.toggle("hidden", !hasEvent);
   $("#noEventNotice").classList.toggle("hidden", hasEvent);
-  // Closing the event while a ticket is open leaves nothing to show there: go back to Tickets.
-  if (!hasEvent && currentView() === "order") showView("tickets");
+  // Without an event only the Events tab is shown: the rest only make sense during one.
+  $$(".tab[data-view]").forEach((tab) => {
+    if (tab.dataset.view !== "events") tab.classList.toggle("hidden", !hasEvent);
+  });
+  $("#ticketTabs").classList.toggle("hidden", !hasEvent);
+  if (!hasEvent && EVENT_VIEWS.includes(currentView())) showView("events");
   $("#barExportActive").disabled = !hasEvent;
   $("#foodExportActive").disabled = !hasEvent;
   if (hasEvent) {
@@ -1887,7 +1959,7 @@ async function closeEvent() {
     setStatus("Name and date are required before closing the event.");
     return;
   }
-  if (!confirm(`Close "${name}"? Ordering stops until you open a new event.`)) return;
+  if (!(await confirmDialog(`Close "${name}"? Ordering stops until you open a new event.`, { confirmLabel: "Close event" }))) return;
   try {
     await api("/api/events/active", {
       method: "POST",
@@ -1922,7 +1994,10 @@ async function openEvent() {
     nameInput.value = "";
     delete $("#newEventVenue").dataset.touched;
     clearOrder();
+    await loadMenu();
     await refreshAll();
+    // Closing an event clears the menu, so a fresh event usually starts by setting it up.
+    showView(state.menu.some((item) => item.active) ? "tickets" : "menu");
     setStatus(`Opened ${event.name}`);
   } catch (error) {
     setStatus(error.message);
@@ -2062,10 +2137,10 @@ async function createDraftVenue() {
   }
 }
 
-function cancelVenueEditor() {
+async function cancelVenueEditor() {
   const layout = state.layout;
   const started = layout && (layout.tables.length || $("#layoutNameInput").value.trim());
-  if (isDraftLayout() && started && !confirm("Discard this new venue?")) return;
+  if (isDraftLayout() && started && !(await confirmDialog("Discard this new venue?", { confirmLabel: "Discard", danger: true }))) return;
   closeVenueEditor(undefined);
 }
 
@@ -2418,7 +2493,7 @@ async function deleteVenue() {
   if (!layout) return;
   const count = layout.tables.length;
   // A venue that events use can't be deleted; the server says which events, so skip the question.
-  if (!layout.event_count && !confirm(`Delete venue ${layout.name}${count ? ` and its ${count} ${count === 1 ? "table" : "tables"}` : ""}?`)) return;
+  if (!layout.event_count && !(await confirmDialog(`Delete venue ${layout.name}${count ? ` and its ${count} ${count === 1 ? "table" : "tables"}` : ""}?`, { confirmLabel: "Delete", danger: true }))) return;
   try {
     await api(`/api/venues/${layout.id}`, { method: "DELETE" });
     await closeVenueEditor(null);
@@ -2434,10 +2509,26 @@ async function refreshAll() {
   await Promise.all([renderTickets(), renderSummary()]);
 }
 
+// In-app confirmation in place of window.confirm. Resolves true when confirmed; Escape or Cancel resolve false.
+function confirmDialog(message, { confirmLabel = "OK", danger = false } = {}) {
+  const dialog = $("#confirmDialog");
+  const ok = $("#confirmOk");
+  $("#confirmMessage").textContent = message;
+  ok.textContent = confirmLabel;
+  ok.classList.toggle("accent", !danger);
+  ok.classList.toggle("danger-fill", danger);
+  dialog.returnValue = "";
+  dialog.showModal();
+  ok.focus();
+  return new Promise((resolve) => {
+    dialog.addEventListener("close", () => resolve(dialog.returnValue === "ok"), { once: true });
+  });
+}
+
 async function start() {
   await loadMenu();
   await refreshAll();
-  setStatus(state.activeEvent ? "Ready" : "No active event");
+  setStatus(state.activeEvent ? "Ready" : "No event running");
 }
 
 $$(".tab").forEach((tab) => tab.addEventListener("click", () => switchView(tab.dataset.view)));
@@ -2455,13 +2546,13 @@ $("#tableNo").addEventListener("input", () => {
     markDirty();
   }
 });
-$("#tableNo").addEventListener("change", () => {
+$("#tableNo").addEventListener("change", async () => {
   const ticket = state.currentTicket;
   if (!ticket) return;
   const input = $("#tableNo");
   const next = input.value.trim();
   if (next === ticket.table_no) return;
-  if (next && confirm(`Move this ticket from ${tableLabel(ticket.table_no)} to ${tableLabel(next)}?`)) {
+  if (next && await confirmDialog(`Move this ticket from ${tableLabel(ticket.table_no)} to ${tableLabel(next)}?`, { confirmLabel: "Move" })) {
     moveCurrentTicket({ table_no: next, venue_table_id: null });
   } else {
     input.value = ticket.table_no;
@@ -2505,7 +2596,6 @@ $("#boardNewTicket").addEventListener("click", startLabelledTicket);
 $("#boardNewName").addEventListener("keydown", (event) => {
   if (event.key === "Enter") startLabelledTicket();
 });
-$("#backToBoard").addEventListener("click", () => switchView("tickets"));
 $$("[data-goto]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.goto)));
 $("#openClash").addEventListener("click", openClashingTicket);
 $("#editTable").addEventListener("click", editTable);

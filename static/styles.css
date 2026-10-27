@@ -1696,3 +1696,174 @@ input[readonly] {
     margin-left: 0;
   }
 }
+
+.confirm-dialog {
+  width: min(420px, calc(100vw - 32px));
+  padding: 20px 20px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.confirm-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.32);
+}
+
+.confirm-dialog p {
+  margin: 0 0 18px;
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+button.danger-fill {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: white;
+  font-weight: 600;
+}
+
+button.danger-fill:hover {
+  background: #a80d1a;
+}
+
+.menu-row.last-pinned {
+  margin-bottom: 10px;
+  box-shadow: 0 6px 0 -4px var(--line);
+}
+
+/* Payment rows: stripes so a label lines up with its count; picked rows are tinted. */
+.allocation {
+  padding: 3px 6px;
+}
+
+.allocation:nth-child(even) {
+  background: rgba(0, 0, 0, 0.035);
+}
+
+.allocation:not(.none):not(.overcount) {
+  background: var(--filter-tint);
+}
+
+.allocation:hover {
+  box-shadow: inset 0 0 0 1px var(--filter-line);
+}
+
+.pay-split {
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.pay-split-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.pay-split-head span {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.pay-split.paid .pay-split-head span {
+  color: #0b5a08;
+}
+
+.pay-split.pending .pay-split-head span {
+  color: var(--warn);
+}
+
+.pay-split-line {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 4px 0;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.pay-split-line.total {
+  color: var(--text);
+}
+
+.pay-split-empty {
+  margin: 4px 0 8px;
+  color: var(--muted);
+}
+
+/* The split being taken stands out; paid splits drop below it, quieter. */
+.editable-split {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.final-splits-head,
+.final-split {
+  order: 1;
+}
+
+.final-splits-head {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.final-split {
+  padding: 8px 12px;
+  opacity: 0.7;
+}
+
+.final-split:hover {
+  opacity: 1;
+}
+
+.pay-split.pending {
+  margin: 0 -6px 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.pay-split.pending .pay-split-line.total strong {
+  font-size: 17px;
+}
+
+.pay-split-paid-head {
+  margin: 4px 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pay-split.paid {
+  opacity: 0.6;
+  font-size: 13px;
+}
+
+/* No spinner arrows on number fields: counts have their own - and + buttons, amounts are typed. */
+input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}

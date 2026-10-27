@@ -29,11 +29,11 @@ The app creates `mikuna.db` automatically on first run. That file is your local 
 1. Open an event on the `Events` tab, optionally at a venue. Pick `New venue…` in the venue list to name a venue and lay out its tables, or `Edit layout` next to the list to change one.
 2. Open the `Menu` tab.
 3. Add today’s menu codes, item names, and prices.
-4. Use the `Tickets` tab to take orders. It shows the venue's tables: click a free table to start its ticket, or a highlighted table (with the amount due) to add items, take payment or move it to another table. Each table has at most one open ticket. `Ticket without table` is for the bar, takeaway or a name. Without a venue, tickets go by a typed table or name.
+4. Use the `Tables` tab to take orders. It shows the venue's tables: click a free table to start its ticket, or a highlighted table to add items, take payment or move it to another table. Each table has at most one open ticket. `Ticket without table` is for the bar, takeaway or a name. Without a venue, tickets go by a typed table or name.
 5. Search, item filters and paid tickets are beside and below the grid. Matching tables are highlighted.
 6. Use `Totals` for sales and cash tracking.
 
-Item filters on the `Tickets` tab are minimum matches. For example, `CV = 1` finds any open ticket with at least one `CV`; combining `CV = 1` and `DS = 1` finds tickets that have both.
+Item filters on the `Tables` tab are minimum matches. For example, `CV = 1` finds any open ticket with at least one `CV`; combining `CV = 1` and `DS = 1` finds tickets that have both.
 
 ## Workbook Import
 
